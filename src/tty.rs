@@ -56,6 +56,12 @@ pub fn ask(prompt: &str) -> String {
 /// returning the full chosen line. Returns None on cancel. `lines` may also be
 /// single-column (label only); then the label is the value.
 pub fn pick_lines(lines: &[String], prompt: &str) -> Option<String> {
+    pick_lines_q(lines, prompt, "")
+}
+
+/// Like `pick_lines`, but seeds fzf's input box with `prefill` so the user
+/// starts with the filename query already typed.
+pub fn pick_lines_q(lines: &[String], prompt: &str, prefill: &str) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
@@ -64,13 +70,16 @@ pub fn pick_lines(lines: &[String], prompt: &str) -> Option<String> {
     let with_nth = if is_tsv { "2" } else { "1" };
     let mut cmd = Command::new("fzf");
     cmd.args(["--delimiter=\t", &format!("--with-nth={with_nth}")])
-        .args(["--prompt", prompt])
-        .args([
-            "--reverse",
-            "--cycle",
-            "--no-multi",
-            "--tiebreak=begin,index",
-        ]);
+        .args(["--prompt", prompt]);
+    if !prefill.is_empty() {
+        cmd.args(["--query", prefill]);
+    }
+    cmd.args([
+        "--reverse",
+        "--cycle",
+        "--no-multi",
+        "--tiebreak=begin,index",
+    ]);
     let mut child = match cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

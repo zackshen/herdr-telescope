@@ -33,11 +33,35 @@ pub fn run() -> i32 {
     let ctx = OriginContext::from_env();
     let keys = crate::keys::load();
 
+    // A per-invocation file fzf writes the live query to (via a `change:`
+    // execute-silent bind). fzf 0.43 can't return a no-match/aborted query on
+    // stdout, so the `@…` shortcut reads it from here instead.
+    let query_file = std::env::temp_dir().join(format!("telescope-q-{}", std::process::id()));
+
     let lines = build_list(&keys);
-    let Some(choice) = fzf_select(&lines) else {
+    let sel = fzf_select(&lines, &query_file).unwrap_or_default();
+
+    // The query captured live (strip fzf's single-quote wrapper if present).
+    let query = std::fs::read_to_string(&query_file)
+        .ok()
+        .map(|s| s.trim().trim_matches('\'').to_string())
+        .unwrap_or_else(|| sel.query.clone());
+    let _ = std::fs::remove_file(&query_file);
+
+    // `@…` shortcut: typing "@<query>" jumps straight to the file finder,
+    // prefilling the filename query (no need to pick the "files" entry first).
+    // fzf aborts (empty selection) on a `@…` query since it matches no action
+    // row; the captured query is what decides.
+    if let Some(prefill) = query.strip_prefix('@') {
+        let prefill = prefill.trim().to_string();
+        crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace, &prefill);
         return close_self(0);
-    };
-    let fields: Vec<&str> = choice.split('\t').collect();
+    }
+
+    if sel.line.is_empty() {
+        return close_self(0);
+    }
+    let fields: Vec<&str> = sel.line.split('\t').collect();
     let kind = fields.first().copied().unwrap_or("");
     let payload = fields.get(1).copied().unwrap_or("");
     dispatch(kind, payload, &ctx);
@@ -123,24 +147,38 @@ fn col_width() -> usize {
 }
 
 /// Run fzf over the rows; return the full chosen line (kind\tpayload\t…).
-fn fzf_select(lines: &[String]) -> Option<String> {
+/// The result of the main fzf: the final query text plus the selected TSV line.
+/// `--print-query` puts the query on the first stdout line, the selection after.
+#[derive(Debug, Default)]
+struct Selection {
+    query: String,
+    line: String,
+}
+
+fn fzf_select(lines: &[String], query_file: &std::path::Path) -> Option<Selection> {
     let input = lines.join("\n") + "\n";
     let preview_cmd = "printf '%s\n' {5}";
+    // fzf shells `{q}` as `'<query>'`; we write it to a file on every change so
+    // the process can read the final query even if fzf exits without a selection
+    // (fzf 0.43 only emits the query on stdout when a row is accepted).
+    let change_bind = format!(
+        "change:execute-silent(printf \"%s\" \"{{q}}\" > {})",
+        query_file.display()
+    );
     let mut cmd = std::process::Command::new("fzf");
-    cmd.args([
-        "--delimiter=\t",
-        "--with-nth=3",
-        "--ansi",
-        "--prompt=herdr telescope ▸ ",
-        "--header=↑↓ select · enter run · esc cancel",
-        "--reverse",
-        "--cycle",
-        "--no-multi",
-        "--tiebreak=begin,index",
-        "--info=inline",
-    ])
-    .args(["--preview", preview_cmd])
-    .args(["--preview-window", "down,3,wrap,border-top"]);
+    cmd.args(["--delimiter=\t", "--with-nth=3", "--ansi", "--print-query"])
+        .args(["--bind", &change_bind])
+        .args(["--prompt=herdr telescope ▸ "])
+        .args(["--header=↑↓ select · enter run · esc cancel"])
+        .args([
+            "--reverse",
+            "--cycle",
+            "--no-multi",
+            "--tiebreak=begin,index",
+            "--info=inline",
+        ])
+        .args(["--preview", preview_cmd])
+        .args(["--preview-window", "down,3,wrap,border-top"]);
     use std::io::Write;
     let mut child = match cmd
         .stdin(std::process::Stdio::piped())
@@ -157,13 +195,24 @@ fn fzf_select(lines: &[String]) -> Option<String> {
         let _ = stdin.write_all(input.as_bytes());
     }
     let out = child.wait_with_output().ok()?;
+    // Abort (esc / ctrl-c / no-match enter) exits non-zero but still leaves the
+    // live query file populated by the `change:` bind — return an empty
+    // Selection so `run()` can check for the `@…` shortcut regardless.
     if !out.status.success() {
-        return None; // esc / ctrl-c
+        return Some(Selection::default());
     }
-    String::from_utf8(out.stdout)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let text = String::from_utf8(out.stdout).ok()?;
+    let mut sel = Selection::default();
+    let mut first = true;
+    for l in text.lines() {
+        if first {
+            sel.query = l.to_string();
+            first = false;
+        } else if sel.line.is_empty() && !l.is_empty() {
+            sel.line = l.to_string();
+        }
+    }
+    Some(sel)
 }
 
 /// Dispatch a selected row.
@@ -171,7 +220,7 @@ fn dispatch(kind: &str, payload: &str, ctx: &OriginContext) {
     match kind {
         "native" => dispatch_native(payload, ctx),
         "plugin" => dispatch_plugin(payload),
-        "files" => crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace),
+        "files" => crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace, ""),
         _ => (), // unknown -> nothing
     }
 }

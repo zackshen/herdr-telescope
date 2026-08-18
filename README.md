@@ -10,7 +10,9 @@ implemented in Rust. Merges three things into one small, **centered popup**:
    (what [herdr-command-palette](https://github.com/JanTvrdik/herdr-command-palette)
    surfaces).
 3. **a file finder** — pick a file under the origin cwd, then open it in a **new pane**
-   or a **new window**.
+   or a **new window**. Type `@<query>` in the telescope (e.g. `@palette.rs`) and press
+   enter to jump straight to the file finder with that query pre-filled — no need to
+   select the "Search files…" entry first.
 
 The UI follows herdr-quick-actions: a modal `popup` (70%×70%, centered over the active
 pane) that runs fzf in a real TTY. Every row ends with a preview strip showing the exact
@@ -82,6 +84,8 @@ Now `prefix` then `q` (Ctrl+B, Q with the default prefix) opens the telescope.
 - **Search files…**: filters the origin cwd with `fd` (gitignore-aware), falling back
   to `git ls-files -co --exclude-standard`, then `find` (depth 6, capped). Pick a file,
   then choose:
+  **Shortcut:** type `@<query>` in the main telescope (e.g. `@palette.rs`) and press
+  enter to skip straight to the file finder with that query pre-filled.
 
   | choice   | what happens                                                              |
   |----------|---------------------------------------------------------------------------|

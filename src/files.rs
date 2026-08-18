@@ -3,7 +3,7 @@
 //! file's parent directory; the file path is exported to the new shell as
 //! `TELESCOPE_OPEN_FILE` so the user (or a shell hook) can act on it.
 
-use crate::tty::{die, pick_lines, run_cli};
+use crate::tty::{die, pick_lines, pick_lines_q, run_cli};
 
 struct Picked {
     /// absolute file path.
@@ -12,13 +12,16 @@ struct Picked {
 
 /// Entry point: search files from `cwd`, let the user pick one, then prompt for
 /// "new pane" / "new window" and dispatch.
-pub fn run(cwd: &str, origin_pane: &str, _origin_workspace: &str) {
+/// Entry point: search files from `cwd`, let the user pick one, then prompt for
+/// "new pane" / "new window" and dispatch. `prefill` seeds the filename query
+/// (used by the `@…` shortcut).
+pub fn run(cwd: &str, origin_pane: &str, _origin_workspace: &str, prefill: &str) {
     if cwd.is_empty() || !std::path::Path::new(cwd).is_dir() {
         die("telescope: no usable origin directory to search files under.");
         return;
     }
 
-    let picked = pick_file(cwd);
+    let picked = pick_file(cwd, prefill);
     let Some(picked) = picked else {
         return; // cancelled
     };
@@ -45,7 +48,8 @@ pub fn run(cwd: &str, origin_pane: &str, _origin_workspace: &str) {
 }
 
 /// Run fzf over the files under `cwd` and return the chosen absolute path.
-fn pick_file(cwd: &str) -> Option<Picked> {
+/// `prefill` seeds the initial query.
+fn pick_file(cwd: &str, prefill: &str) -> Option<Picked> {
     // Prefer `fd` (fast, gitignore-aware). Other engines feed the same fzf.
     let mut paths = Vec::new();
     collect_files(cwd, &mut paths);
@@ -68,7 +72,7 @@ fn pick_file(cwd: &str) -> Option<Picked> {
         .collect();
 
     let prompt = format!("telescope files ▸  ({} files)", rows.len());
-    pick_lines(&rows, &prompt).map(|line| {
+    pick_lines_q(&rows, &prompt, prefill).map(|line| {
         let abs = line.split('\t').next().unwrap_or("").to_string();
         Picked { path: abs }
     })

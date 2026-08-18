@@ -54,7 +54,7 @@ command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-telescope\" palett
 # ~/.config/herdr/config.toml instead, then `herdr server reload-config`:
 #
 #   [[keys.command]]
-#   key = "prefix+q"
+#   key = "prefix+p"
 #   type = "plugin_action"
 #   command = "telescope.open"
 #   description = "Telescope (actions & files)"

@@ -40,20 +40,30 @@ herdr telescope ▸ clo
 - `fd` (optional, preferred for the file finder) or a `git` repo; falls back to `find`.
 - [`rg`](https://github.com/BurntSushi/ripgrep) for `/` content search.
 - [`bat`](https://github.com/sharkdp/bat) (optional) to syntax-highlight the right-hand search preview.
-- Rust toolchain only for building.
+- Rust toolchain only if you build from source. `herdr plugin install` downloads a prebuilt binary.
 
 ## Install
 
-From GitHub (`[[build]]` runs `cargo build --release`):
+Prebuilt binaries, no Rust toolchain needed:
 
 ```bash
 herdr plugin install zackshen/herdr-telescope
+```
+
+`[[build]]` downloads `herdr-telescope` for this platform from the matching
+[GitHub Release](https://github.com/zackshen/herdr-telescope/releases) into `bin/`.
+
+To update, reinstall:
+
+```bash
+herdr plugin uninstall telescope && herdr plugin install zackshen/herdr-telescope
 ```
 
 Or link a local checkout (link does **not** run `[[build]]`):
 
 ```bash
 cargo build --release
+mkdir -p bin && cp target/release/herdr-telescope bin/
 herdr plugin link ./herdr-telescope   # from the parent directory
 ```
 

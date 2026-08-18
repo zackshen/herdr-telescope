@@ -20,9 +20,11 @@ min_herdr_version = "0.8.0"
 description = "fzf command telescope: built-in native herdr actions, every installed plugin's actions, a file finder (@), and live ripgrep content search (/) — in one centered popup."
 platforms = ["linux", "macos"]
 
-# `herdr plugin install` runs this after clone and before register.
+# On `herdr plugin install`, download the prebuilt binary for this platform
+# from the matching GitHub Release into bin/ (no Rust toolchain needed).
+# Skipped by `herdr plugin link` — for a local checkout, build it yourself.
 [[build]]
-command = ["cargo", "build", "--release"]
+command = ["bash", "herdr/install.sh"]
 
 # The user-facing entry point, qualified globally as `telescope.open`. herdr
 # actions run on the server WITHOUT a TTY, so this can't run fzf itself — it
@@ -33,7 +35,7 @@ command = ["cargo", "build", "--release"]
 id = "open"
 title = "Telescope (native actions · plugin actions · files)"
 contexts = ["workspace"]
-command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-telescope\" open"]
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-telescope\" open"]
 
 # The interactive picker. `popup` = a small modal terminal centered over the
 # active pane, WITHOUT changing the tab/pane layout — as opposed to `overlay`
@@ -46,7 +48,7 @@ title = "Telescope"
 placement = "popup"
 width = "70%"
 height = "70%"
-command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-telescope\" palette"]
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-telescope\" palette"]
 
 # herdr does NOT bind keys declared in a plugin manifest. Bind a key in
 # ~/.config/herdr/config.toml instead, then `herdr server reload-config`:

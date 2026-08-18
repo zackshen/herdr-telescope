@@ -1,0 +1,120 @@
+# herdr-telescope
+
+An [fzf](https://github.com/junegunn/fzf) command telescope for [herdr](https://herdr.dev),
+implemented in Rust. Merges three things into one small, **centered popup**:
+
+1. **herdr's native actions** — the tab/pane/workspace/worktree/agent/session actions
+   herdr itself binds (the list [herdr-quick-actions](https://github.com/enekos/herdr-quick-actions)
+   surfaces), each row showing the keybinding herdr actually has for it.
+2. **every action of every installed plugin** — via `herdr plugin action list`
+   (what [herdr-command-palette](https://github.com/JanTvrdik/herdr-command-palette)
+   surfaces).
+3. **a file finder** — pick a file under the origin cwd, then open it in a **new pane**
+   or a **new window**.
+
+The UI follows herdr-quick-actions: a modal `popup` (70%×70%, centered over the active
+pane) that runs fzf in a real TTY. Every row ends with a preview strip showing the exact
+`herdr` command it will run.
+
+```
+herdr telescope ▸ clo
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ ↑↓ select · enter run · esc cancel                                          │
+│ > Close pane                          ctrl+b x   kill remove quit delete    │
+│   Close tab                           ctrl+b shift+x  kill remove quit …     │
+│   Close workspace                     ctrl+b shift+d  kill remove project    │
+│   es.quick-actions.open  Quick actions (native tab/pane/workspace/… )       │
+│   🔍 Search files…                                                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ herdr pane close <pane>                                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Requirements
+
+- [herdr](https://herdr.dev) ≥ 0.8.0
+- [fzf](https://github.com/junegunn/fzf)
+- `fd` (optional, preferred for the file finder) or a `git` repo; falls back to `find`.
+- Rust toolchain only for building.
+
+## Install
+
+From this repo (runs the `cargo build` in the interactive preview):
+
+```bash
+cargo build --release
+herdr plugin link ./herdr-telescope   # from the parent directory
+```
+
+…or publish to GitHub and use the short form:
+
+```bash
+herdr plugin install <owner>/herdr-telescope
+```
+
+herdr does NOT bind keys declared in a plugin manifest. Add a binding to
+`~/.config/herdr/config.toml` and reload:
+
+```toml
+[[keys.command]]
+key = "prefix+q"
+type = "plugin_action"
+command = "telescope.open"
+description = "Telescope (actions & files)"
+```
+
+```bash
+herdr server reload-config
+```
+
+Now `prefix` then `q` (Ctrl+B, Q with the default prefix) opens the telescope.
+
+## What's in the list
+
+- **Native actions** (ranked list): New/close/rename tab, split panes, toggle zoom,
+  close/rename pane, focus/resize/swap/move pane, start an agent in a new split,
+  prompt/interrupt/rename agent, new/close/rename workspace, worktrees, and reload
+  config. The shortcut column is resolved live from `herdr --default-config` plus your
+  `config.toml`; a `[[keys.command]]` binding that shadows a built-in shows no shortcut.
+- **Plugin actions**: every `plugin.action  <title>` from `herdr plugin action list`
+  (your own `telescope` actions are hidden). Selecting one runs
+  `herdr plugin action invoke <id>` and polls the plugin log so failures surface.
+- **Search files…**: filters the origin cwd with `fd` (gitignore-aware), falling back
+  to `git ls-files -co --exclude-standard`, then `find` (depth 6, capped). Pick a file,
+  then choose:
+
+  | choice   | what happens                                                              |
+  |----------|---------------------------------------------------------------------------|
+  | New pane | `herdr pane split <origin> --direction right --cwd <filedir> --focus`     |
+  | New window | `herdr tab create --cwd <filedir> --label <filename> --focus`           |
+
+  Both drop you in the file's directory (no origin pane → falls back to a new window).
+  The action you invoked it from acts on the *origin* pane, not the popup itself.
+
+## How it works
+
+herdr actions run on the server with **no TTY**, so an action can't run fzf directly:
+
+1. `telescope.open` captures the origin pane/tab/workspace/cwd from
+   `HERDR_PLUGIN_CONTEXT_JSON` and opens a **small, centered popup**
+   (`placement = "popup"` — a real modal window, like quick-actions), forwarding the
+   origin ids as a single `TELESCOPE_CTX` env blob. The popup *does* get a TTY.
+2. Inside the popup, `herdr-telescope palette` builds the merged TSV list, pipes it to
+   fzf, and dispatches the selection by calling the `herdr` CLI directly.
+   Keybindings and plugin actions are resolved live; nothing is hardcoded against a
+   herdr version.
+3. On exit the popup is closed explicitly (popup placement doesn't reliably tear
+   itself down).
+
+## Debugging
+
+The palette mode can be driven without a TTY to inspect the generated rows:
+
+```bash
+export TELESCOPE_CTX='{"pane":"w1:p1","tab":"w1:t1","workspace":"w1","cwd":"/repo"}'
+./target/release/herdr-telescope palette   # interactive fzf (run in a terminal)
+```
+
+## License
+
+MIT

@@ -1,0 +1,54 @@
+# herdr-plugin.toml — manifest for herdr-telescope.
+#
+# An fzf command telescope for herdr, implemented in Rust. It merges three things
+# into one centered popup:
+#   1. herdr's NATIVE actions (new tab, close pane, split, focus/resize/swap/move
+#      pane, zoom, worktrees, agents, session) — the list herdr-quick-actions
+#      surfaces, each row showing the keybinding herdr actually has for it.
+#   2. every ACTION exposed by every INSTALLED PLUGIN (`herdr plugin action
+#      list`) — what jt.command-palette surfaces.
+#   3. a FILE FINDER: pick any file under the origin cwd, then open it in a new
+#      pane or a new window (your choice).
+#
+# The UI mirrors herdr-quick-actions: a small, centered modal popup (
+# `placement = "popup"`) that runs fzf in a real TTY.
+
+id = "telescope"
+name = "Herdr Telescope"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "fzf command telescope: built-in native herdr actions, every installed plugin's actions, and a file finder — in one centered popup."
+platforms = ["linux", "macos"]
+
+# The user-facing entry point, qualified globally as `telescope.open`. herdr
+# actions run on the server WITHOUT a TTY, so this can't run fzf itself — it
+# opens the `palette` popup pane below, which gets a real terminal. It forwards
+# the ORIGIN pane/tab/workspace/cwd as a single JSON env blob (TELESCOPE_CTX) so
+# the popup acts on the pane you invoked it from, not on itself.
+[[actions]]
+id = "open"
+title = "Telescope (native actions · plugin actions · files)"
+contexts = ["workspace"]
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-telescope\" open"]
+
+# The interactive picker. `popup` = a small modal terminal centered over the
+# active pane, WITHOUT changing the tab/pane layout — as opposed to `overlay`
+# (used by jt.command-palette), which zooms to fill the active pane. width/height
+# are the popup size as a percentage of the terminal area. Invoked by absolute
+# path because open.sh sets this pane's --cwd to the origin repo.
+[[panes]]
+id = "palette"
+title = "Telescope"
+placement = "popup"
+width = "70%"
+height = "70%"
+command = ["bash", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-telescope\" palette"]
+
+# herdr does NOT bind keys declared in a plugin manifest. Bind a key in
+# ~/.config/herdr/config.toml instead, then `herdr server reload-config`:
+#
+#   [[keys.command]]
+#   key = "prefix+q"
+#   type = "plugin_action"
+#   command = "telescope.open"
+#   description = "Telescope (actions & files)"

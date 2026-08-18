@@ -26,6 +26,7 @@ fn main() -> ExitCode {
     match mode.as_str() {
         "open" => open_action(),
         "palette" => ExitCode::from(palette::run() as u8),
+        "at-switch" | "at-back" => ExitCode::from(palette::run_at_helper() as u8),
         _ => {
             eprintln!("telescope: usage: herdr-telescope (open|palette)");
             ExitCode::from(2)

@@ -1,7 +1,5 @@
 //! The file finder: pick a file under the origin cwd, then open it in a new
-//! pane (split) or a new window (tab). Both spawn a shell whose cwd is the
-//! file's parent directory; the file path is exported to the new shell as
-//! `TELESCOPE_OPEN_FILE` so the user (or a shell hook) can act on it.
+//! pane (split) or a new window (tab) with `$EDITOR`.
 
 use crate::tty::{die, pick_lines, pick_lines_q, run_cli};
 
@@ -11,10 +9,8 @@ struct Picked {
 }
 
 /// Entry point: search files from `cwd`, let the user pick one, then prompt for
-/// "new pane" / "new window" and dispatch.
-/// Entry point: search files from `cwd`, let the user pick one, then prompt for
 /// "new pane" / "new window" and dispatch. `prefill` seeds the filename query
-/// (used by the `@…` shortcut).
+/// (used when jumping in from the "Search files…" row).
 pub fn run(cwd: &str, origin_pane: &str, _origin_workspace: &str, prefill: &str) {
     if cwd.is_empty() || !std::path::Path::new(cwd).is_dir() {
         die("telescope: no usable origin directory to search files under.");
@@ -25,13 +21,17 @@ pub fn run(cwd: &str, origin_pane: &str, _origin_workspace: &str, prefill: &str)
     let Some(picked) = picked else {
         return; // cancelled
     };
-    let file = picked.path;
+    confirm_and_open(&picked.path, origin_pane);
+}
+
+/// Prompt for pane vs window and open `file`. Used when a file row is accepted
+/// from the main telescope after the `@` live switch.
+pub fn confirm_and_open(file: &str, origin_pane: &str) {
     let parent = file
         .rfind('/')
         .map(|i| file[..i].to_string())
-        .unwrap_or_else(|| file.clone());
+        .unwrap_or_else(|| file.to_string());
 
-    // Ask: open in a new pane or a new window.
     let opts = vec![
         "pane\tNew pane (split, right)".to_string(),
         "window\tNew window (tab)".to_string(),
@@ -42,9 +42,30 @@ pub fn run(cwd: &str, origin_pane: &str, _origin_workspace: &str, prefill: &str)
     let target = choice.split('\t').next().unwrap_or("").to_string();
 
     match target.as_str() {
-        "window" => open_window(&file, &parent),
-        _ => open_pane(&file, &parent, origin_pane),
+        "window" => open_window(file, &parent),
+        _ => open_pane(file, &parent, origin_pane),
     }
+}
+
+/// Same TSV shape as the action list (`kind\tpayload\tdisplay\tkeywords\thint`)
+/// so the main fzf can `reload` these rows when the query starts with `@`.
+pub fn file_tsv_rows(cwd: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_files(cwd, &mut paths);
+    paths
+        .iter()
+        .map(|p| {
+            let rel = rel_to(cwd, p);
+            format!("files\t{p}\t{rel}\t{rel}\topen {rel} with $EDITOR in a new pane or window")
+        })
+        .collect()
+}
+
+fn rel_to(cwd: &str, path: &str) -> String {
+    path.strip_prefix(cwd)
+        .unwrap_or(path)
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Run fzf over the files under `cwd` and return the chosen absolute path.
@@ -62,13 +83,7 @@ fn pick_file(cwd: &str, prefill: &str) -> Option<Picked> {
     // absolute path is the value in field 1.
     let rows: Vec<String> = paths
         .iter()
-        .map(|p| {
-            let rel = p
-                .strip_prefix(cwd)
-                .unwrap_or(p.as_str())
-                .trim_start_matches('/');
-            format!("{p}\t{rel}")
-        })
+        .map(|p| format!("{p}\t{}", rel_to(cwd, p)))
         .collect();
 
     let prompt = format!("telescope files ▸  ({} files)", rows.len());
@@ -157,29 +172,22 @@ fn ensure_absolute(cwd: &str, paths: &mut Vec<String>) {
     paths.retain(|p| !p.is_empty());
 }
 
-/// Open the file in a new tab ("new window"). cwd becomes the file's directory.
+/// Open the file in a new tab ("new window") and run `$EDITOR` there.
 fn open_window(file: &str, parent: &str) {
     if parent.is_empty() {
         die("telescope: cannot open a window for a file with no directory.");
         return;
     }
-    // Label = the file's base name (the thing being opened).
     let label = file.rsplit('/').next().unwrap_or("file").to_string();
-    let args = [
-        "tab".to_string(),
-        "create".to_string(),
-        "--cwd".to_string(),
-        parent.to_string(),
-        "--label".to_string(),
-        label,
-        "--focus".to_string(),
-    ];
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_cli(&arg_refs);
+    let pane = create_pane(&[
+        "tab", "create", "--cwd", parent, "--label", &label, "--focus",
+    ]);
+    let Some(pane) = pane else { return };
+    run_editor(&pane, file);
 }
 
-/// Open the file in a new pane (split of the origin pane), cwd = the file's
-/// directory. Without an origin pane we open a tab instead.
+/// Open the file in a new pane (split of the origin pane) and run `$EDITOR`.
+/// Without an origin pane we open a tab instead.
 fn open_pane(file: &str, parent: &str, origin_pane: &str) {
     if parent.is_empty() {
         die("telescope: cannot open a pane for a file with no directory.");
@@ -189,18 +197,67 @@ fn open_pane(file: &str, parent: &str, origin_pane: &str) {
         open_window(file, parent);
         return;
     }
-    let args = [
-        "pane".to_string(),
-        "split".to_string(),
-        origin_pane.to_string(),
-        "--direction".to_string(),
-        "right".to_string(),
-        "--cwd".to_string(),
-        parent.to_string(),
-        "--focus".to_string(),
-    ];
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    run_cli(&arg_refs);
+    let pane = create_pane(&[
+        "pane",
+        "split",
+        origin_pane,
+        "--direction",
+        "right",
+        "--cwd",
+        parent,
+        "--focus",
+    ]);
+    let Some(pane) = pane else { return };
+    run_editor(&pane, file);
+}
+
+fn create_pane(args: &[&str]) -> Option<String> {
+    let out = crate::herdr::run(args);
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        die(&format!("herdr {} failed: {err}", args.join(" ")));
+        return None;
+    }
+    let body: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+    if let Some(id) = pane_id_from(&body) {
+        return Some(id);
+    }
+    die("telescope: could not read the new pane id after opening the file.");
+    None
+}
+
+fn pane_id_from(body: &serde_json::Value) -> Option<String> {
+    for ptr in [
+        "/result/pane/pane_id",
+        "/result/root_pane/pane_id",
+        "/result/root_pane",
+    ] {
+        if let Some(id) = body.pointer(ptr).and_then(|v| v.as_str()) {
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn run_editor(pane: &str, file: &str) {
+    run_cli(["pane", "run", pane, &editor_command(file)]);
+}
+
+/// Shell text sent to the new pane: `$EDITOR` if set, otherwise `${EDITOR:-vi}`
+/// so the pane's own environment can still supply it.
+fn editor_command(file: &str) -> String {
+    let quoted = shell_single_quote(file);
+    match std::env::var("EDITOR") {
+        Ok(ed) if !ed.trim().is_empty() => format!("{} {quoted}", ed.trim()),
+        _ => format!("${{EDITOR:-vi}} {quoted}"),
+    }
+}
+
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -229,7 +286,43 @@ mod tests {
             "missing sub/b.rs, got {out:?}"
         );
 
+        let rows = file_tsv_rows(d);
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with(&format!("files\t{d}/a.txt\ta.txt\t"))),
+            "tsv row missing a.txt, got {rows:?}"
+        );
+
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn quotes_file_path_for_the_shell() {
+        assert_eq!(shell_single_quote("/a/b.rs"), "'/a/b.rs'");
+        assert_eq!(shell_single_quote("/a/it's.rs"), "'/a/it'\\''s.rs'");
+    }
+
+    #[test]
+    fn editor_command_uses_env_or_fallback() {
+        let cmd = editor_command("/tmp/a.rs");
+        assert!(
+            cmd.ends_with(" '/tmp/a.rs'"),
+            "file should be quoted, got {cmd}"
+        );
+        assert!(
+            cmd.contains("EDITOR") || cmd.contains("vi") || !cmd.trim().is_empty(),
+            "expected an editor invocation, got {cmd}"
+        );
+    }
+
+    #[test]
+    fn pane_id_from_split_and_tab_responses() {
+        let split = serde_json::json!({"result":{"pane":{"pane_id":"w1:p2"}}});
+        assert_eq!(pane_id_from(&split).as_deref(), Some("w1:p2"));
+        let tab = serde_json::json!({"result":{"root_pane":{"pane_id":"w1:p3"}}});
+        assert_eq!(pane_id_from(&tab).as_deref(), Some("w1:p3"));
+        let tab_str = serde_json::json!({"result":{"root_pane":"w1:p4"}});
+        assert_eq!(pane_id_from(&tab_str).as_deref(), Some("w1:p4"));
     }
 
     #[test]

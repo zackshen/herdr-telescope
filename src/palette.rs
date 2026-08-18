@@ -7,7 +7,7 @@ use crate::context::OriginContext;
 use crate::herdr;
 use crate::keys::Keys;
 use crate::native;
-use crate::tty::{ask, die, pick_lines, run_cli};
+use crate::tty::{ask, die, paint_popup, pick_lines, run_cli, FZF_OPAQUE};
 
 /// Version of the self plugin, used to hide our own actions from the list.
 const SELF_PLUGIN: &str = "telescope";
@@ -33,30 +33,13 @@ pub fn run() -> i32 {
     let ctx = OriginContext::from_env();
     let keys = crate::keys::load();
 
-    // A per-invocation file fzf writes the live query to (via a `change:`
-    // execute-silent bind). fzf 0.43 can't return a no-match/aborted query on
-    // stdout, so the `@…` shortcut reads it from here instead.
-    let query_file = std::env::temp_dir().join(format!("telescope-q-{}", std::process::id()));
-
     let lines = build_list(&keys);
-    let sel = fzf_select(&lines, &query_file).unwrap_or_default();
-
-    // The query captured live (strip fzf's single-quote wrapper if present).
-    let query = std::fs::read_to_string(&query_file)
-        .ok()
-        .map(|s| s.trim().trim_matches('\'').to_string())
-        .unwrap_or_else(|| sel.query.clone());
-    let _ = std::fs::remove_file(&query_file);
-
-    // `@…` shortcut: typing "@<query>" jumps straight to the file finder,
-    // prefilling the filename query (no need to pick the "files" entry first).
-    // fzf aborts (empty selection) on a `@…` query since it matches no action
-    // row; the captured query is what decides.
-    if let Some(prefill) = query.strip_prefix('@') {
-        let prefill = prefill.trim().to_string();
-        crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace, &prefill);
-        return close_self(0);
-    }
+    let files = if !ctx.cwd.is_empty() && std::path::Path::new(&ctx.cwd).is_dir() {
+        crate::files::file_tsv_rows(&ctx.cwd)
+    } else {
+        Vec::new()
+    };
+    let sel = fzf_select(&lines, &files).unwrap_or_default();
 
     if sel.line.is_empty() {
         return close_self(0);
@@ -146,30 +129,102 @@ fn col_width() -> usize {
     80
 }
 
-/// Run fzf over the rows; return the full chosen line (kind\tpayload\t…).
-/// The result of the main fzf: the final query text plus the selected TSV line.
-/// `--print-query` puts the query on the first stdout line, the selection after.
+/// The selected TSV line from the main fzf.
 #[derive(Debug, Default)]
 struct Selection {
-    query: String,
     line: String,
 }
 
-fn fzf_select(lines: &[String], query_file: &std::path::Path) -> Option<Selection> {
-    let input = lines.join("\n") + "\n";
-    let preview_cmd = "printf '%s\n' {5}";
-    // fzf shells `{q}` as `'<query>'`; we write it to a file on every change so
-    // the process can read the final query even if fzf exits without a selection
-    // (fzf 0.43 only emits the query on stdout when a row is accepted).
+/// Prompt shown in action mode. The `@` switch keys off this exact string to
+/// know whether the list has already been reloaded to files.
+const ACTIONS_PROMPT: &str = "herdr telescope ▸ ";
+const FILES_PROMPT: &str = "herdr files ▸ ";
+const ACTIONS_HEADER: &str = "↑↓ select · enter run · @ files · esc cancel";
+const FILES_HEADER: &str = "↑↓ select · enter open · backspace to return";
+
+/// Consume the leading `@` in fzf's own query box (so `@C` becomes `C` and
+/// filters files normally). Runs in fzf's shell so we never quote the query.
+const STRIP_AT: &str = r#"transform-query[printf %s "${FZF_QUERY#@}"]"#;
+
+/// fzf `change:transform` helper. Called as `herdr-telescope at-switch
+/// <actions> <files>` with `FZF_QUERY`/`FZF_PROMPT` set by fzf.
+///
+/// Typing `@` (or pasting `@C`) while in the action list reloads the file
+/// rows immediately and strips the `@` so the remainder is a normal file
+/// query. Backspace on an empty file query (`backward-eof`) is what returns
+/// to actions — a query without `@` must not bounce back, or stripping `@`
+/// would immediately leave file mode.
+pub fn at_switch(actions: &str, files: &str, query: &str, prompt: &str) -> String {
+    let _ = actions;
+    if !query.starts_with('@') {
+        return String::new();
+    }
+    if prompt == FILES_PROMPT {
+        format!("{STRIP_AT}\n")
+    } else {
+        format!(
+            "reload-sync[cat -- {files}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+{STRIP_AT}\n"
+        )
+    }
+}
+
+/// `backward-eof` helper: leave file mode when the query is already empty.
+pub fn at_back(actions: &str, prompt: &str) -> String {
+    if prompt == FILES_PROMPT {
+        format!(
+            "reload-sync[cat -- {actions}]+change-prompt[{ACTIONS_PROMPT}]+change-header[{ACTIONS_HEADER}]\n"
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// Entry point for the fzf transform helpers (`at-switch` / `at-back`).
+pub fn run_at_helper() -> i32 {
+    let mut args = std::env::args().skip(1);
+    let kind = args.next().unwrap_or_default();
+    let actions = args.next().unwrap_or_default();
+    let files = args.next().unwrap_or_default();
+    let query = std::env::var("FZF_QUERY").unwrap_or_default();
+    let prompt = std::env::var("FZF_PROMPT").unwrap_or_default();
+    let out = match kind.as_str() {
+        "at-back" => at_back(&actions, &prompt),
+        _ => at_switch(&actions, &files, &query, &prompt),
+    };
+    print!("{out}");
+    0
+}
+
+fn fzf_select(lines: &[String], files: &[String]) -> Option<Selection> {
+    let tmp = std::env::temp_dir().join(format!("telescope-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let actions_path = tmp.join("actions");
+    let files_path = tmp.join("files");
+    let _ = std::fs::write(&actions_path, lines.join("\n") + "\n");
+    let _ = std::fs::write(&files_path, files.join("\n") + "\n");
+
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .unwrap_or_else(|| "herdr-telescope".into());
     let change_bind = format!(
-        "change:execute-silent(printf \"%s\" \"{{q}}\" > {})",
-        query_file.display()
+        "change:transform[{exe} at-switch {actions} {files}]",
+        actions = actions_path.display(),
+        files = files_path.display(),
     );
+    let back_bind = format!(
+        "backward-eof:transform[{exe} at-back {actions}]",
+        actions = actions_path.display(),
+    );
+    let preview_cmd = "printf '%s\n' {5}";
+    paint_popup();
     let mut cmd = std::process::Command::new("fzf");
-    cmd.args(["--delimiter=\t", "--with-nth=3", "--ansi", "--print-query"])
+    cmd.args(["--delimiter=\t", "--with-nth=3", "--ansi"])
         .args(["--bind", &change_bind])
-        .args(["--prompt=herdr telescope ▸ "])
-        .args(["--header=↑↓ select · enter run · esc cancel"])
+        .args(["--bind", &back_bind])
+        .args([format!("--prompt={ACTIONS_PROMPT}")])
+        .args([format!("--header={ACTIONS_HEADER}")])
+        .args(["--color", FZF_OPAQUE])
         .args([
             "--reverse",
             "--cycle",
@@ -187,32 +242,27 @@ fn fzf_select(lines: &[String], query_file: &std::path::Path) -> Option<Selectio
     {
         Ok(c) => c,
         Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp);
             die(&format!("telescope: could not start fzf: {e}"));
             return None;
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
+        let _ = stdin.write_all((lines.join("\n") + "\n").as_bytes());
     }
-    let out = child.wait_with_output().ok()?;
-    // Abort (esc / ctrl-c / no-match enter) exits non-zero but still leaves the
-    // live query file populated by the `change:` bind — return an empty
-    // Selection so `run()` can check for the `@…` shortcut regardless.
+    let out = child.wait_with_output().ok();
+    let _ = std::fs::remove_dir_all(&tmp);
+    let out = out?;
     if !out.status.success() {
         return Some(Selection::default());
     }
     let text = String::from_utf8(out.stdout).ok()?;
-    let mut sel = Selection::default();
-    let mut first = true;
-    for l in text.lines() {
-        if first {
-            sel.query = l.to_string();
-            first = false;
-        } else if sel.line.is_empty() && !l.is_empty() {
-            sel.line = l.to_string();
-        }
-    }
-    Some(sel)
+    let line = text
+        .lines()
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string();
+    Some(Selection { line })
 }
 
 /// Dispatch a selected row.
@@ -220,7 +270,8 @@ fn dispatch(kind: &str, payload: &str, ctx: &OriginContext) {
     match kind {
         "native" => dispatch_native(payload, ctx),
         "plugin" => dispatch_plugin(payload),
-        "files" => crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace, ""),
+        "files" if payload.is_empty() => crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace, ""),
+        "files" => crate::files::confirm_and_open(payload, &ctx.pane),
         _ => (), // unknown -> nothing
     }
 }
@@ -741,5 +792,54 @@ fn ask_with_prompt_default(prompt: &str, default: &str) -> Option<String> {
         Some(default.to_string())
     } else {
         Some(ans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn at_switch_enters_files_on_at() {
+        let out = at_switch("/tmp/a", "/tmp/f", "@", ACTIONS_PROMPT);
+        assert!(
+            out.contains("reload-sync[cat -- /tmp/f]"),
+            "should reload files, got {out:?}"
+        );
+        assert!(out.contains(&format!("change-prompt[{FILES_PROMPT}]")));
+        assert!(out.contains(STRIP_AT));
+    }
+
+    #[test]
+    fn at_switch_paste_at_c_strips_prefix() {
+        let out = at_switch("/tmp/a", "/tmp/f", "@C", ACTIONS_PROMPT);
+        assert!(out.contains("reload-sync[cat -- /tmp/f]"));
+        assert!(out.contains(STRIP_AT));
+    }
+
+    #[test]
+    fn at_switch_does_not_bounce_while_filtering_files() {
+        assert_eq!(at_switch("/tmp/a", "/tmp/f", "C", FILES_PROMPT), "");
+        assert_eq!(
+            at_switch("/tmp/a", "/tmp/f", "@C", FILES_PROMPT),
+            format!("{STRIP_AT}\n")
+        );
+    }
+
+    #[test]
+    fn at_back_returns_to_actions_from_files() {
+        let out = at_back("/tmp/a", FILES_PROMPT);
+        assert!(
+            out.contains("reload-sync[cat -- /tmp/a]"),
+            "should reload actions, got {out:?}"
+        );
+        assert!(out.contains(&format!("change-prompt[{ACTIONS_PROMPT}]")));
+    }
+
+    #[test]
+    fn at_switch_noop_while_still_in_actions() {
+        assert_eq!(at_switch("/tmp/a", "/tmp/f", "clo", ACTIONS_PROMPT), "");
+        assert_eq!(at_switch("/tmp/a", "/tmp/f", "", ACTIONS_PROMPT), "");
+        assert_eq!(at_back("/tmp/a", ACTIONS_PROMPT), "");
     }
 }

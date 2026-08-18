@@ -10,9 +10,9 @@ implemented in Rust. Merges three things into one small, **centered popup**:
    (what [herdr-command-palette](https://github.com/JanTvrdik/herdr-command-palette)
    surfaces).
 3. **a file finder** — pick a file under the origin cwd, then open it in a **new pane**
-   or a **new window**. Type `@<query>` in the telescope (e.g. `@palette.rs`) and press
-   enter to jump straight to the file finder with that query pre-filled — no need to
-   select the "Search files…" entry first.
+   or a **new window**. Type `@` in the telescope to switch the list to files immediately
+   (e.g. type `@` then `palette.rs`, or paste `@palette.rs`) — no need to select
+   "Search files…" first. Backspace on an empty query to return to actions.
 
 The UI follows herdr-quick-actions: a modal `popup` (70%×70%, centered over the active
 pane) that runs fzf in a real TTY. Every row ends with a preview strip showing the exact
@@ -35,7 +35,7 @@ herdr telescope ▸ clo
 ## Requirements
 
 - [herdr](https://herdr.dev) ≥ 0.8.0
-- [fzf](https://github.com/junegunn/fzf)
+- [fzf](https://github.com/junegunn/fzf) ≥ 0.48 (`transform` / `reload-sync`; 0.74 used here)
 - `fd` (optional, preferred for the file finder) or a `git` repo; falls back to `find`.
 - Rust toolchain only for building.
 
@@ -84,15 +84,17 @@ Now `prefix` then `q` (Ctrl+B, Q with the default prefix) opens the telescope.
 - **Search files…**: filters the origin cwd with `fd` (gitignore-aware), falling back
   to `git ls-files -co --exclude-standard`, then `find` (depth 6, capped). Pick a file,
   then choose:
-  **Shortcut:** type `@<query>` in the main telescope (e.g. `@palette.rs`) and press
-  enter to skip straight to the file finder with that query pre-filled.
+  **Shortcut:** type `@` in the main telescope to switch the list to files in place
+  (the `@` is consumed; then type `C` or `@C` to filter names matching `C`).
+  Backspace on an empty query to return to actions.
 
   | choice   | what happens                                                              |
   |----------|---------------------------------------------------------------------------|
-  | New pane | `herdr pane split <origin> --direction right --cwd <filedir> --focus`     |
-  | New window | `herdr tab create --cwd <filedir> --label <filename> --focus`           |
+  | New pane | split the origin pane, then `herdr pane run <new> "$EDITOR <file>"`       |
+  | New window | new tab, then `herdr pane run <root> "$EDITOR <file>"`                  |
 
-  Both drop you in the file's directory (no origin pane → falls back to a new window).
+  Both drop you in the file's directory and open the file with `$EDITOR`
+  (falls back to `vi` if unset). No origin pane → falls back to a new window.
   The action you invoked it from acts on the *origin* pane, not the popup itself.
 
 ## How it works

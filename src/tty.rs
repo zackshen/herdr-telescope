@@ -8,6 +8,21 @@ use std::process::Command;
 
 use crate::herdr;
 
+/// Fill the popup with an opaque background. Herdr's `placement = "popup"`
+/// is a floating terminal: empty cells show the pane underneath, so Grok
+/// (or whatever is focused) bleeds through unless we paint every cell.
+pub fn paint_popup() {
+    // Black SGR + erase display: most terminals fill the erased area with
+    // the current background, which is what we need before fzf starts.
+    eprint!("\x1b[40m\x1b[2J\x1b[H");
+    let _ = std::io::stderr().flush();
+}
+
+/// fzf color spec that paints every pane (list / input / header / preview)
+/// instead of leaving the default (transparent) background.
+pub const FZF_OPAQUE: &str =
+    "bg:#1c1c1c,fg:#e6e6e6,preview-bg:#1c1c1c,list-bg:#1c1c1c,input-bg:#1c1c1c,header-bg:#1c1c1c,gutter:#1c1c1c,current-bg:#2a2a2a,border:#555555,preview-border:#555555";
+
 /// Print `$*` to stderr, hold briefly, then exit 1. Called at the END of a
 /// dispatch error path so it passes through `close_self` before exiting, so a
 /// failure surfaces visibly instead of vanishing with the popup.
@@ -68,9 +83,11 @@ pub fn pick_lines_q(lines: &[String], prompt: &str, prefill: &str) -> Option<Str
     let input = lines.join("\n") + "\n";
     let is_tsv = lines[0].contains('\t');
     let with_nth = if is_tsv { "2" } else { "1" };
+    paint_popup();
     let mut cmd = Command::new("fzf");
     cmd.args(["--delimiter=\t", &format!("--with-nth={with_nth}")])
-        .args(["--prompt", prompt]);
+        .args(["--prompt", prompt])
+        .args(["--color", FZF_OPAQUE]);
     if !prefill.is_empty() {
         cmd.args(["--query", prefill]);
     }

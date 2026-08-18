@@ -5,7 +5,7 @@ edition = "2021"
 description = "fzf command telescope for herdr: built-in native actions + every installed plugin's actions, plus a file finder that opens a result in a new pane or window."
 license = "MIT"
 rust-version = "1.70"
-repository = "https://github.com/herdrdev/herdr-telescope"
+repository = "https://github.com/zackshen/herdr-telescope"
 
 [[bin]]
 name = "herdr-telescope"

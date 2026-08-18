@@ -15,6 +15,7 @@ mod herdr;
 mod keys;
 mod native;
 mod palette;
+mod search;
 mod tty;
 
 use std::process::ExitCode;
@@ -27,6 +28,8 @@ fn main() -> ExitCode {
         "open" => open_action(),
         "palette" => ExitCode::from(palette::run() as u8),
         "at-switch" | "at-back" => ExitCode::from(palette::run_at_helper() as u8),
+        "rg-files" => ExitCode::from(search::run_rg_files() as u8),
+        "rg-preview" | "preview" => ExitCode::from(search::run_rg_preview() as u8),
         _ => {
             eprintln!("telescope: usage: herdr-telescope (open|palette)");
             ExitCode::from(2)

@@ -39,7 +39,7 @@ pub fn run() -> i32 {
     } else {
         Vec::new()
     };
-    let sel = fzf_select(&lines, &files).unwrap_or_default();
+    let sel = fzf_select(&lines, &files, &ctx.cwd).unwrap_or_default();
 
     if sel.line.is_empty() {
         return close_self(0);
@@ -104,11 +104,21 @@ fn build_list(keys: &Keys) -> Vec<String> {
         }
     }
 
-    // 3. File finder entry.
-    let display = "\u{1b}[2mfiles\u{1b}[0m Search files…";
-    let keywords = "find file grep search fd rg locate".to_string();
-    let hint = "pick a file, then open it in a new pane or a new window".to_string();
-    out.push(tsv("files", "", display, &keywords, &hint));
+    // 3. File finder + content search entries.
+    out.push(tsv(
+        "files",
+        "",
+        "\u{1b}[2mfiles\u{1b}[0m Search files…",
+        "find file grep search fd rg locate",
+        "type @ to jump here, then pick a file",
+    ));
+    out.push(tsv(
+        "search",
+        "",
+        "\u{1b}[2msearch\u{1b}[0m Search contents…",
+        "rg grep content text /",
+        "type / to jump here and search with ripgrep",
+    ));
 
     out
 }
@@ -135,47 +145,77 @@ struct Selection {
     line: String,
 }
 
-/// Prompt shown in action mode. The `@` switch keys off this exact string to
-/// know whether the list has already been reloaded to files.
+/// Prompt shown in action mode. Mode switches key off these exact strings.
 const ACTIONS_PROMPT: &str = "herdr telescope ▸ ";
 const FILES_PROMPT: &str = "herdr files ▸ ";
-const ACTIONS_HEADER: &str = "↑↓ select · enter run · @ files · esc cancel";
+const SEARCH_PROMPT: &str = "herdr search ▸ ";
+const ACTIONS_HEADER: &str = "↑↓ select · enter run · @ files · / search · esc cancel";
 const FILES_HEADER: &str = "↑↓ select · enter open · backspace to return";
+const SEARCH_HEADER: &str = "↑↓ select · enter open · rg live · backspace to return";
 
-/// Consume the leading `@` in fzf's own query box (so `@C` becomes `C` and
-/// filters files normally). Runs in fzf's shell so we never quote the query.
+const ACTION_PREVIEW_WIN: &str = "down,3,wrap,border-top";
+const SEARCH_PREVIEW_WIN: &str = "right,60%,wrap,border-left";
+
+/// Consume a leading `@` or `/` so the remainder is the real query.
 const STRIP_AT: &str = r#"transform-query[printf %s "${FZF_QUERY#@}"]"#;
+const STRIP_SLASH: &str = r#"transform-query[printf %s "${FZF_QUERY#/}"]"#;
 
-/// fzf `change:transform` helper. Called as `herdr-telescope at-switch
-/// <actions> <files>` with `FZF_QUERY`/`FZF_PROMPT` set by fzf.
-///
-/// Typing `@` (or pasting `@C`) while in the action list reloads the file
-/// rows immediately and strips the `@` so the remainder is a normal file
-/// query. Backspace on an empty file query (`backward-eof`) is what returns
-/// to actions — a query without `@` must not bounce back, or stripping `@`
-/// would immediately leave file mode.
-pub fn at_switch(actions: &str, files: &str, query: &str, prompt: &str) -> String {
-    let _ = actions;
-    if !query.starts_with('@') {
-        return String::new();
-    }
+fn mode_of(prompt: &str) -> Mode {
     if prompt == FILES_PROMPT {
-        format!("{STRIP_AT}\n")
+        Mode::Files
+    } else if prompt == SEARCH_PROMPT {
+        Mode::Search
     } else {
-        format!(
-            "reload-sync[cat -- {files}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+{STRIP_AT}\n"
-        )
+        Mode::Actions
     }
 }
 
-/// `backward-eof` helper: leave file mode when the query is already empty.
-pub fn at_back(actions: &str, prompt: &str) -> String {
-    if prompt == FILES_PROMPT {
-        format!(
-            "reload-sync[cat -- {actions}]+change-prompt[{ACTIONS_PROMPT}]+change-header[{ACTIONS_HEADER}]\n"
-        )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Actions,
+    Files,
+    Search,
+}
+
+/// fzf `change:transform` helper. `@` → filename list, `/` → rg content
+/// search (fzf's own matcher is disabled so the query is the rg pattern).
+pub fn at_switch(actions: &str, files: &str, query: &str, prompt: &str, exe: &str) -> String {
+    let mode = mode_of(prompt);
+    if query.starts_with('@') {
+        return match mode {
+            Mode::Files => format!("{STRIP_AT}\n"),
+            Mode::Search => format!(
+                "enable-search+reload-sync[cat -- {files}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+change-preview-window[{ACTION_PREVIEW_WIN}]+{STRIP_AT}\n"
+            ),
+            Mode::Actions => format!(
+                "reload-sync[cat -- {files}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+{STRIP_AT}\n"
+            ),
+        };
+    }
+    if query.starts_with('/') {
+        let rg = format!("{exe} rg-files");
+        return match mode {
+            Mode::Search => format!("{STRIP_SLASH}\n"),
+            _ => format!(
+                "disable-search+reload-sync[{rg}]+change-prompt[{SEARCH_PROMPT}]+change-header[{SEARCH_HEADER}]+change-preview-window[{SEARCH_PREVIEW_WIN}]+{STRIP_SLASH}\n"
+            ),
+        };
+    }
+    if mode == Mode::Search {
+        format!("reload-sync[{exe} rg-files]\n")
     } else {
+        let _ = actions;
         String::new()
+    }
+}
+
+/// `backward-eof` helper: leave file/search mode when the query is empty.
+pub fn at_back(actions: &str, prompt: &str) -> String {
+    match mode_of(prompt) {
+        Mode::Files | Mode::Search => format!(
+            "enable-search+reload-sync[cat -- {actions}]+change-prompt[{ACTIONS_PROMPT}]+change-header[{ACTIONS_HEADER}]+change-preview-window[{ACTION_PREVIEW_WIN}]\n"
+        ),
+        Mode::Actions => String::new(),
     }
 }
 
@@ -187,15 +227,19 @@ pub fn run_at_helper() -> i32 {
     let files = args.next().unwrap_or_default();
     let query = std::env::var("FZF_QUERY").unwrap_or_default();
     let prompt = std::env::var("FZF_PROMPT").unwrap_or_default();
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_string))
+        .unwrap_or_else(|| "herdr-telescope".into());
     let out = match kind.as_str() {
         "at-back" => at_back(&actions, &prompt),
-        _ => at_switch(&actions, &files, &query, &prompt),
+        _ => at_switch(&actions, &files, &query, &prompt, &exe),
     };
     print!("{out}");
     0
 }
 
-fn fzf_select(lines: &[String], files: &[String]) -> Option<Selection> {
+fn fzf_select(lines: &[String], files: &[String], cwd: &str) -> Option<Selection> {
     let tmp = std::env::temp_dir().join(format!("telescope-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
     let actions_path = tmp.join("actions");
@@ -216,7 +260,6 @@ fn fzf_select(lines: &[String], files: &[String]) -> Option<Selection> {
         "backward-eof:transform[{exe} at-back {actions}]",
         actions = actions_path.display(),
     );
-    let preview_cmd = "printf '%s\n' {5}";
     paint_popup();
     let mut cmd = std::process::Command::new("fzf");
     cmd.args(["--delimiter=\t", "--with-nth=3", "--ansi"])
@@ -232,8 +275,11 @@ fn fzf_select(lines: &[String], files: &[String]) -> Option<Selection> {
             "--tiebreak=begin,index",
             "--info=inline",
         ])
-        .args(["--preview", preview_cmd])
-        .args(["--preview-window", "down,3,wrap,border-top"]);
+        .args(["--preview", &format!("{exe} preview {{}}")])
+        .args(["--preview-window", ACTION_PREVIEW_WIN]);
+    if !cwd.is_empty() {
+        cmd.env("TELESCOPE_CWD", cwd);
+    }
     use std::io::Write;
     let mut child = match cmd
         .stdin(std::process::Stdio::piped())
@@ -272,6 +318,7 @@ fn dispatch(kind: &str, payload: &str, ctx: &OriginContext) {
         "plugin" => dispatch_plugin(payload),
         "files" if payload.is_empty() => crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace, ""),
         "files" => crate::files::confirm_and_open(payload, &ctx.pane),
+        "search" => {}
         _ => (), // unknown -> nothing
     }
 }
@@ -801,7 +848,7 @@ mod tests {
 
     #[test]
     fn at_switch_enters_files_on_at() {
-        let out = at_switch("/tmp/a", "/tmp/f", "@", ACTIONS_PROMPT);
+        let out = at_switch("/tmp/a", "/tmp/f", "@", ACTIONS_PROMPT, "tel");
         assert!(
             out.contains("reload-sync[cat -- /tmp/f]"),
             "should reload files, got {out:?}"
@@ -812,34 +859,60 @@ mod tests {
 
     #[test]
     fn at_switch_paste_at_c_strips_prefix() {
-        let out = at_switch("/tmp/a", "/tmp/f", "@C", ACTIONS_PROMPT);
+        let out = at_switch("/tmp/a", "/tmp/f", "@C", ACTIONS_PROMPT, "tel");
         assert!(out.contains("reload-sync[cat -- /tmp/f]"));
         assert!(out.contains(STRIP_AT));
     }
 
     #[test]
     fn at_switch_does_not_bounce_while_filtering_files() {
-        assert_eq!(at_switch("/tmp/a", "/tmp/f", "C", FILES_PROMPT), "");
+        assert_eq!(at_switch("/tmp/a", "/tmp/f", "C", FILES_PROMPT, "tel"), "");
         assert_eq!(
-            at_switch("/tmp/a", "/tmp/f", "@C", FILES_PROMPT),
+            at_switch("/tmp/a", "/tmp/f", "@C", FILES_PROMPT, "tel"),
             format!("{STRIP_AT}\n")
         );
     }
 
     #[test]
-    fn at_back_returns_to_actions_from_files() {
-        let out = at_back("/tmp/a", FILES_PROMPT);
+    fn at_switch_enters_search_on_slash() {
+        let out = at_switch("/tmp/a", "/tmp/f", "/", ACTIONS_PROMPT, "tel");
+        assert!(out.contains("disable-search"), "got {out:?}");
+        assert!(out.contains("reload-sync[tel rg-files]"), "got {out:?}");
+        assert!(out.contains(&format!("change-prompt[{SEARCH_PROMPT}]")));
         assert!(
-            out.contains("reload-sync[cat -- /tmp/a]"),
-            "should reload actions, got {out:?}"
+            !out.contains("change-preview["),
+            "preview stays on --preview {{}}, got {out:?}"
         );
-        assert!(out.contains(&format!("change-prompt[{ACTIONS_PROMPT}]")));
+        assert!(out.contains(&format!("change-preview-window[{SEARCH_PREVIEW_WIN}]")));
+        assert!(out.contains(STRIP_SLASH));
+    }
+
+    #[test]
+    fn at_switch_reloads_rg_while_typing_in_search() {
+        let out = at_switch("/tmp/a", "/tmp/f", "foo", SEARCH_PROMPT, "tel");
+        assert_eq!(out, "reload-sync[tel rg-files]\n");
+    }
+
+    #[test]
+    fn at_back_returns_to_actions_from_files_or_search() {
+        for prompt in [FILES_PROMPT, SEARCH_PROMPT] {
+            let out = at_back("/tmp/a", prompt);
+            assert!(
+                out.contains("reload-sync[cat -- /tmp/a]"),
+                "should reload actions, got {out:?}"
+            );
+            assert!(out.contains("enable-search"));
+            assert!(out.contains(&format!("change-prompt[{ACTIONS_PROMPT}]")));
+        }
     }
 
     #[test]
     fn at_switch_noop_while_still_in_actions() {
-        assert_eq!(at_switch("/tmp/a", "/tmp/f", "clo", ACTIONS_PROMPT), "");
-        assert_eq!(at_switch("/tmp/a", "/tmp/f", "", ACTIONS_PROMPT), "");
+        assert_eq!(
+            at_switch("/tmp/a", "/tmp/f", "clo", ACTIONS_PROMPT, "tel"),
+            ""
+        );
+        assert_eq!(at_switch("/tmp/a", "/tmp/f", "", ACTIONS_PROMPT, "tel"), "");
         assert_eq!(at_back("/tmp/a", ACTIONS_PROMPT), "");
     }
 }

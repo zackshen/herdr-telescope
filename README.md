@@ -12,7 +12,8 @@ implemented in Rust. Merges three things into one small, **centered popup**:
 3. **a file finder** — pick a file under the origin cwd, then open it in a **new pane**
    or a **new window**. Type `@` in the telescope to switch the list to files immediately
    (e.g. type `@` then `palette.rs`, or paste `@palette.rs`) — no need to select
-   "Search files…" first. Backspace on an empty query to return to actions.
+   "Search files…" first. Type `/` to search file *contents* with `rg` (left: matching
+   files, right: highlighted lines). Backspace on an empty query to return to actions.
 
 The UI follows herdr-quick-actions: a modal `popup` (70%×70%, centered over the active
 pane) that runs fzf in a real TTY. Every row ends with a preview strip showing the exact
@@ -37,21 +38,23 @@ herdr telescope ▸ clo
 - [herdr](https://herdr.dev) ≥ 0.8.0
 - [fzf](https://github.com/junegunn/fzf) ≥ 0.48 (`transform` / `reload-sync`; 0.74 used here)
 - `fd` (optional, preferred for the file finder) or a `git` repo; falls back to `find`.
+- [`rg`](https://github.com/BurntSushi/ripgrep) for `/` content search.
+- [`bat`](https://github.com/sharkdp/bat) (optional) to syntax-highlight the right-hand search preview.
 - Rust toolchain only for building.
 
 ## Install
 
-From this repo (runs the `cargo build` in the interactive preview):
+From GitHub (`[[build]]` runs `cargo build --release`):
+
+```bash
+herdr plugin install zackshen/herdr-telescope
+```
+
+Or link a local checkout (link does **not** run `[[build]]`):
 
 ```bash
 cargo build --release
 herdr plugin link ./herdr-telescope   # from the parent directory
-```
-
-…or publish to GitHub and use the short form:
-
-```bash
-herdr plugin install <owner>/herdr-telescope
 ```
 
 herdr does NOT bind keys declared in a plugin manifest. Add a binding to
@@ -86,7 +89,9 @@ Now `prefix` then `q` (Ctrl+B, Q with the default prefix) opens the telescope.
   then choose:
   **Shortcut:** type `@` in the main telescope to switch the list to files in place
   (the `@` is consumed; then type `C` or `@C` to filter names matching `C`).
-  Backspace on an empty query to return to actions.
+  Type `/` to search contents with ripgrep: the list becomes matching files and
+  the preview moves to the right, highlighting hits. Backspace on an empty
+  query to return to actions.
 
   | choice   | what happens                                                              |
   |----------|---------------------------------------------------------------------------|

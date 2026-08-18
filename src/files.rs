@@ -52,16 +52,15 @@ pub fn confirm_and_open(file: &str, origin_pane: &str) {
 pub fn file_tsv_rows(cwd: &str) -> Vec<String> {
     let mut paths = Vec::new();
     collect_files(cwd, &mut paths);
-    paths
-        .iter()
-        .map(|p| {
-            let rel = rel_to(cwd, p);
-            format!("files\t{p}\t{rel}\t{rel}\topen {rel} with $EDITOR in a new pane or window")
-        })
-        .collect()
+    paths.iter().map(|p| file_row(cwd, p)).collect()
 }
 
-fn rel_to(cwd: &str, path: &str) -> String {
+pub(crate) fn file_row(cwd: &str, path: &str) -> String {
+    let rel = rel_to(cwd, path);
+    format!("files\t{path}\t{rel}\t{rel}\topen {rel} with $EDITOR in a new pane or window")
+}
+
+pub(crate) fn rel_to(cwd: &str, path: &str) -> String {
     path.strip_prefix(cwd)
         .unwrap_or(path)
         .trim_start_matches('/')
@@ -159,7 +158,7 @@ fn collect_files(cwd: &str, out: &mut Vec<String>) {
 }
 
 /// Prepend `cwd` to any relative path so fzf carries absolute values.
-fn ensure_absolute(cwd: &str, paths: &mut Vec<String>) {
+pub(crate) fn ensure_absolute(cwd: &str, paths: &mut Vec<String>) {
     let cwd = cwd.trim_end_matches('/');
     for p in paths.iter_mut() {
         if !p.starts_with('/') {

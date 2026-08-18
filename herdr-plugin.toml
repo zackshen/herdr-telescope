@@ -17,8 +17,12 @@ id = "telescope"
 name = "Herdr Telescope"
 version = "0.1.0"
 min_herdr_version = "0.8.0"
-description = "fzf command telescope: built-in native herdr actions, every installed plugin's actions, and a file finder — in one centered popup."
+description = "fzf command telescope: built-in native herdr actions, every installed plugin's actions, a file finder (@), and live ripgrep content search (/) — in one centered popup."
 platforms = ["linux", "macos"]
+
+# `herdr plugin install` runs this after clone and before register.
+[[build]]
+command = ["cargo", "build", "--release"]
 
 # The user-facing entry point, qualified globally as `telescope.open`. herdr
 # actions run on the server WITHOUT a TTY, so this can't run fzf itself — it

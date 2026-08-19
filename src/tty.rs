@@ -3,7 +3,7 @@
 //! (fzf is spawned for the pick lists; `ask` drops to a plain prompt).
 
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::process::Command;
 
 use crate::herdr;
@@ -47,6 +47,9 @@ fn read_key() -> Option<u8> {
 
 /// Prompt the user for a single-line answer on the controlling TTY.
 /// Empty or aborted input returns an empty string; callers treat that as cancel.
+///
+/// Must read one line, not the rest of the TTY: `read_to_string` waits for EOF
+/// and never returns after Enter, so named-tab / rename prompts freeze.
 pub fn ask(prompt: &str) -> String {
     let mut tty = std::fs::OpenOptions::new()
         .write(true)
@@ -60,10 +63,15 @@ pub fn ask(prompt: &str) -> String {
         });
     let _ = tty.write_all(prompt.as_bytes());
     let _ = tty.flush();
+    read_line(&mut tty)
+}
+
+/// Read through the first newline (or EOF). Used by `ask` so Enter submits.
+pub(crate) fn read_line(r: &mut impl Read) -> String {
     let mut buf = String::new();
-    match (&mut tty as &mut dyn Read).read_to_string(&mut buf) {
+    match std::io::BufReader::new(r).read_line(&mut buf) {
+        Ok(0) | Err(_) => String::new(),
         Ok(_) => buf.trim().to_string(),
-        Err(_) => String::new(),
     }
 }
 
@@ -116,6 +124,29 @@ pub fn pick_lines_q(lines: &[String], prompt: &str, prefill: &str) -> Option<Str
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_line;
+
+    #[test]
+    fn read_line_returns_on_newline_without_waiting_for_eof() {
+        let mut r = std::io::Cursor::new(b"notes\nmore that must not be read");
+        assert_eq!(read_line(&mut r), "notes");
+    }
+
+    #[test]
+    fn read_line_trims_and_treats_empty_as_cancel() {
+        let mut r = std::io::Cursor::new(b"  \n");
+        assert_eq!(read_line(&mut r), "");
+    }
+
+    #[test]
+    fn read_line_at_eof_without_newline_still_returns() {
+        let mut r = std::io::Cursor::new(b"notes");
+        assert_eq!(read_line(&mut r), "notes");
+    }
 }
 
 /// Run a `herdr` command, dying with its stderr on failure. stderr is captured

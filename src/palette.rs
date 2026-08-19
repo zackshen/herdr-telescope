@@ -357,15 +357,89 @@ fn dispatch(kind: &str, payload: &str, ctx: &OriginContext) {
     }
 }
 
-fn dispatch_native(payload: &str, ctx: &OriginContext) {
-    // Route by id.
-    match payload {
-        // ---- tabs ----
+/// Extra answers a native action may need after the main fzf (typed line,
+/// second-stage pick, y/N). Tests inject these so argv planning does not
+/// open a TTY.
+#[derive(Debug, Default, Clone)]
+struct NativeInput {
+    line: Option<String>,
+    extra: Option<String>,
+    pick: Option<String>,
+    confirm: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NativeErr {
+    Cancel,
+    MissingOrigin(&'static str),
+    Unknown,
+    MultiStep,
+}
+
+/// Line prompt shown after fzf for this action. Enter must submit (see `ask`).
+fn line_prompt(id: &str) -> Option<&'static str> {
+    match id {
+        "new_tab_named" | "rename_tab" => Some("New tab name: "),
+        "rename_pane" => Some("New pane name: "),
+        "new_workspace_here" | "rename_workspace" => Some("New workspace name: "),
+        "new_worktree_branch" => Some("Branch name: "),
+        "start_agent" => Some("Agent name (a-z0-9_-): "),
+        "rename_agent" => Some("New agent name (a-z0-9_-): "),
+        "prompt_agent" => Some("Prompt: "),
+        _ => None,
+    }
+}
+
+fn gather_native_input(id: &str, ctx: &OriginContext) -> Option<NativeInput> {
+    let mut input = NativeInput::default();
+    match id {
+        "move_pane_tab" => input.pick = Some(pick_target_tab(ctx)?),
+        "interrupt_agent" | "rename_agent" | "prompt_agent" => input.pick = Some(pick_agent()?),
+        "remove_worktree" => {
+            input.confirm = confirm(format!(
+                "Remove the worktree checkout for {}? [y/N] ",
+                ctx.workspace
+            ));
+        }
+        _ => {}
+    }
+    if let Some(prompt) = line_prompt(id) {
+        if id != "start_agent" {
+            input.line = Some(ask_with_prompt(prompt)?);
+        }
+    }
+    if id == "new_worktree_branch" {
+        input.extra = ask_with_prompt_default("Base ref (empty = default): ", "");
+    }
+    Some(input)
+}
+
+/// herdr argv for a native action. Interactive steps are already in `input`.
+fn native_args(
+    id: &str,
+    ctx: &OriginContext,
+    input: &NativeInput,
+) -> Result<Vec<String>, NativeErr> {
+    let line = || {
+        input
+            .line
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or(NativeErr::Cancel)
+    };
+    let pick = || {
+        input
+            .pick
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or(NativeErr::Cancel)
+    };
+    match id {
         "new_tab" | "new_tab_named" => {
-            let mut args: Vec<String> = vec!["tab", "create", "--focus"]
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let mut args = vec!["tab".into(), "create".into(), "--focus".into()];
             if !ctx.workspace.is_empty() {
                 args.push("--workspace".into());
                 args.push(ctx.workspace.clone());
@@ -374,255 +448,304 @@ fn dispatch_native(payload: &str, ctx: &OriginContext) {
                 args.push("--cwd".into());
                 args.push(ctx.cwd.clone());
             }
-            if payload == "new_tab_named" {
-                if let Some(name) = ask_with_prompt("New tab name: ") {
-                    args.push("--label".into());
-                    args.push(name);
-                } else {
-                    return;
-                }
+            if id == "new_tab_named" {
+                args.push("--label".into());
+                args.push(line()?);
             }
-            run_cli(&args);
+            Ok(args)
         }
         "close_tab" => {
             if ctx.tab.is_empty() {
-                die("telescope: no origin tab to close.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin tab to close.",
+                ));
             }
-            run_cli(["tab", "close", ctx.tab.as_str()]);
+            Ok(vec!["tab".into(), "close".into(), ctx.tab.clone()])
         }
         "rename_tab" => {
             if ctx.tab.is_empty() {
-                die("telescope: no origin tab to rename.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin tab to rename.",
+                ));
             }
-            if let Some(name) = ask_with_prompt("New tab name: ") {
-                run_cli(["tab", "rename", ctx.tab.as_str(), name.as_str()]);
-            }
+            Ok(vec![
+                "tab".into(),
+                "rename".into(),
+                ctx.tab.clone(),
+                line()?,
+            ])
         }
-        // ---- panes ----
         "split_vertical" | "split_horizontal" => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to split.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to split.",
+                ));
             }
-            let dir = if payload == "split_vertical" {
+            let dir = if id == "split_vertical" {
                 "right"
             } else {
                 "down"
             };
-            let mut args: Vec<String> =
-                vec!["pane", "split", &ctx.pane, "--direction", dir, "--focus"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect();
+            let mut args = vec![
+                "pane".into(),
+                "split".into(),
+                ctx.pane.clone(),
+                "--direction".into(),
+                dir.into(),
+                "--focus".into(),
+            ];
             if !ctx.cwd.is_empty() {
                 args.push("--cwd".into());
                 args.push(ctx.cwd.clone());
             }
-            run_cli(&args);
+            Ok(args)
         }
         "close_pane" => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to close.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to close.",
+                ));
             }
-            run_cli(["pane", "close", ctx.pane.as_str()]);
+            Ok(vec!["pane".into(), "close".into(), ctx.pane.clone()])
         }
         "zoom_pane" => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to zoom.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to zoom.",
+                ));
             }
-            run_cli(["pane", "zoom", ctx.pane.as_str(), "--toggle"]);
+            Ok(vec![
+                "pane".into(),
+                "zoom".into(),
+                ctx.pane.clone(),
+                "--toggle".into(),
+            ])
         }
         "rename_pane" => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to rename.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to rename.",
+                ));
             }
-            if let Some(name) = ask_with_prompt("New pane name: ") {
-                run_cli(["pane", "rename", ctx.pane.as_str(), name.as_str()]);
-            }
+            Ok(vec![
+                "pane".into(),
+                "rename".into(),
+                ctx.pane.clone(),
+                line()?,
+            ])
         }
-        d @ ("focus_left" | "focus_right" | "focus_up" | "focus_down") => {
+        d if d.starts_with("focus_") => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to focus from.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to focus from.",
+                ));
             }
-            let dir = d.trim_start_matches("focus_");
-            run_cli([
-                "pane",
-                "focus",
-                "--direction",
-                dir,
-                "--pane",
-                ctx.pane.as_str(),
-            ]);
+            Ok(vec![
+                "pane".into(),
+                "focus".into(),
+                "--direction".into(),
+                d.trim_start_matches("focus_").into(),
+                "--pane".into(),
+                ctx.pane.clone(),
+            ])
         }
-        d @ ("resize_left" | "resize_right" | "resize_up" | "resize_down") => {
+        d if d.starts_with("resize_") => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to resize.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to resize.",
+                ));
             }
-            let dir = d.trim_start_matches("resize_");
-            run_cli([
-                "pane",
-                "resize",
-                "--direction",
-                dir,
-                "--pane",
-                ctx.pane.as_str(),
-            ]);
+            Ok(vec![
+                "pane".into(),
+                "resize".into(),
+                "--direction".into(),
+                d.trim_start_matches("resize_").into(),
+                "--pane".into(),
+                ctx.pane.clone(),
+            ])
         }
-        d @ ("swap_left" | "swap_right" | "swap_up" | "swap_down") => {
+        d if d.starts_with("swap_") => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to swap.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to swap.",
+                ));
             }
-            let dir = d.trim_start_matches("swap_");
-            run_cli([
-                "pane",
-                "swap",
-                "--direction",
-                dir,
-                "--pane",
-                ctx.pane.as_str(),
-            ]);
+            Ok(vec![
+                "pane".into(),
+                "swap".into(),
+                "--direction".into(),
+                d.trim_start_matches("swap_").into(),
+                "--pane".into(),
+                ctx.pane.clone(),
+            ])
         }
-        // ---- panes: move ----
         "move_pane_tab" => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to move.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to move.",
+                ));
             }
-            let target = pick_target_tab(ctx);
-            if let Some(t) = target {
-                run_cli([
-                    "pane",
-                    "move",
-                    ctx.pane.as_str(),
-                    "--tab",
-                    t.as_str(),
-                    "--focus",
-                ]);
-            }
+            Ok(vec![
+                "pane".into(),
+                "move".into(),
+                ctx.pane.clone(),
+                "--tab".into(),
+                pick()?,
+                "--focus".into(),
+            ])
         }
         "move_pane_new_tab" => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to move.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to move.",
+                ));
             }
-            run_cli(["pane", "move", ctx.pane.as_str(), "--new-tab", "--focus"]);
+            Ok(vec![
+                "pane".into(),
+                "move".into(),
+                ctx.pane.clone(),
+                "--new-tab".into(),
+                "--focus".into(),
+            ])
         }
         "move_pane_new_workspace" => {
             if ctx.pane.is_empty() {
-                die("telescope: no origin pane to move.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin pane to move.",
+                ));
             }
-            run_cli([
-                "pane",
-                "move",
-                ctx.pane.as_str(),
-                "--new-workspace",
-                "--focus",
-            ]);
+            Ok(vec![
+                "pane".into(),
+                "move".into(),
+                ctx.pane.clone(),
+                "--new-workspace".into(),
+                "--focus".into(),
+            ])
         }
-        // ---- agents ----
-        "start_agent" => dispatch_start_agent(ctx),
-        "prompt_agent" => dispatch_prompt_agent(),
-        "interrupt_agent" => {
-            let target = pick_agent();
-            if let Some(t) = target {
-                run_cli(["agent", "send-keys", t.as_str(), "esc"]);
-            }
-        }
-        "rename_agent" => {
-            let target = pick_agent();
-            if let Some(t) = target {
-                if let Some(name) = ask_with_prompt("New agent name (a-z0-9_-): ") {
-                    run_cli(["agent", "rename", t.as_str(), name.as_str()]);
-                }
-            }
-        }
-        // ---- workspaces ----
+        "start_agent" => Err(NativeErr::MultiStep),
+        "prompt_agent" => Ok(vec!["agent".into(), "prompt".into(), pick()?, line()?]),
+        "interrupt_agent" => Ok(vec![
+            "agent".into(),
+            "send-keys".into(),
+            pick()?,
+            "esc".into(),
+        ]),
+        "rename_agent" => Ok(vec!["agent".into(), "rename".into(), pick()?, line()?]),
         "new_workspace" | "new_workspace_here" => {
-            let mut args: Vec<String> = vec!["workspace", "create", "--focus"]
-                .into_iter()
-                .map(String::from)
-                .collect();
-            if payload == "new_workspace_here" {
+            let mut args = vec!["workspace".into(), "create".into(), "--focus".into()];
+            if id == "new_workspace_here" {
                 if ctx.cwd.is_empty() {
-                    die("telescope: no origin cwd for the new workspace.");
+                    return Err(NativeErr::MissingOrigin(
+                        "telescope: no origin cwd for the new workspace.",
+                    ));
                 }
-                if let Some(name) = ask_with_prompt("New workspace name: ") {
-                    args.push("--cwd".into());
-                    args.push(ctx.cwd.clone());
-                    args.push("--label".into());
-                    args.push(name);
-                } else {
-                    return;
-                }
+                args.push("--cwd".into());
+                args.push(ctx.cwd.clone());
+                args.push("--label".into());
+                args.push(line()?);
             }
-            run_cli(&args);
+            Ok(args)
         }
         "close_workspace" => {
             if ctx.workspace.is_empty() {
-                die("telescope: no origin workspace to close.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin workspace to close.",
+                ));
             }
-            run_cli(["workspace", "close", ctx.workspace.as_str()]);
+            Ok(vec![
+                "workspace".into(),
+                "close".into(),
+                ctx.workspace.clone(),
+            ])
         }
         "rename_workspace" => {
             if ctx.workspace.is_empty() {
-                die("telescope: no origin workspace to rename.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin workspace to rename.",
+                ));
             }
-            if let Some(name) = ask_with_prompt("New workspace name: ") {
-                run_cli(["workspace", "rename", ctx.workspace.as_str(), name.as_str()]);
-            }
+            Ok(vec![
+                "workspace".into(),
+                "rename".into(),
+                ctx.workspace.clone(),
+                line()?,
+            ])
         }
-        // ---- worktrees ----
         "new_worktree" => {
             if ctx.workspace.is_empty() {
-                die("telescope: no origin workspace to create a worktree in.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin workspace to create a worktree in.",
+                ));
             }
-            run_cli([
-                "worktree",
-                "create",
-                "--workspace",
-                ctx.workspace.as_str(),
-                "--focus",
-            ]);
+            Ok(vec![
+                "worktree".into(),
+                "create".into(),
+                "--workspace".into(),
+                ctx.workspace.clone(),
+                "--focus".into(),
+            ])
         }
         "new_worktree_branch" => {
             if ctx.workspace.is_empty() {
-                die("telescope: no origin workspace to create a worktree in.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin workspace to create a worktree in.",
+                ));
             }
-            if let Some(branch) = ask_with_prompt("Branch name: ") {
-                let mut args: Vec<String> = vec![
-                    "worktree",
-                    "create",
-                    "--workspace",
-                    &ctx.workspace,
-                    "--branch",
-                    &branch,
-                    "--focus",
-                ]
-                .into_iter()
-                .map(String::from)
-                .collect();
-                if let Some(base) = ask_with_prompt_default("Base ref (empty = default): ", "") {
-                    if !base.is_empty() {
-                        args.push("--base".into());
-                        args.push(base);
-                    }
-                }
-                run_cli(&args);
+            let mut args = vec![
+                "worktree".into(),
+                "create".into(),
+                "--workspace".into(),
+                ctx.workspace.clone(),
+                "--branch".into(),
+                line()?,
+                "--focus".into(),
+            ];
+            if let Some(base) = input
+                .extra
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--base".into());
+                args.push(base.to_string());
             }
+            Ok(args)
         }
         "remove_worktree" => {
             if ctx.workspace.is_empty() {
-                die("telescope: no origin workspace to remove.");
+                return Err(NativeErr::MissingOrigin(
+                    "telescope: no origin workspace to remove.",
+                ));
             }
-            if confirm(format!(
-                "Remove the worktree checkout for {}? [y/N] ",
-                ctx.workspace
-            )) {
-                run_cli(["worktree", "remove", "--workspace", ctx.workspace.as_str()]);
+            if !input.confirm {
+                return Err(NativeErr::Cancel);
             }
+            Ok(vec![
+                "worktree".into(),
+                "remove".into(),
+                "--workspace".into(),
+                ctx.workspace.clone(),
+            ])
         }
-        // ---- session ----
-        "reload_config" => {
-            run_cli(["server", "reload-config"]);
-        }
-        _ => die(&format!("telescope: unknown native action '{payload}'.")),
+        "reload_config" => Ok(vec!["server".into(), "reload-config".into()]),
+        _ => Err(NativeErr::Unknown),
+    }
+}
+
+fn dispatch_native(payload: &str, ctx: &OriginContext) {
+    if payload == "start_agent" {
+        dispatch_start_agent(ctx);
+        return;
+    }
+    let Some(input) = gather_native_input(payload, ctx) else {
+        return;
+    };
+    match native_args(payload, ctx, &input) {
+        Ok(args) => run_cli(&args),
+        Err(NativeErr::Cancel) => {}
+        Err(NativeErr::MissingOrigin(msg)) => die(msg),
+        Err(NativeErr::Unknown) => die(&format!("telescope: unknown native action '{payload}'.")),
+        Err(NativeErr::MultiStep) => die(&format!("telescope: unknown native action '{payload}'.")),
     }
 }
 
@@ -744,14 +867,6 @@ fn dispatch_start_agent(ctx: &OriginContext) {
         "--pane",
         new_pane.as_str(),
     ]);
-}
-
-fn dispatch_prompt_agent() {
-    let target = pick_agent();
-    let Some(target) = target else { return };
-    if let Some(text) = ask_with_prompt("Prompt: ") {
-        run_cli(["agent", "prompt", target.as_str(), text.as_str()]);
-    }
 }
 
 fn agent_kinds() -> Vec<String> {
@@ -961,5 +1076,340 @@ mod tests {
         assert!(fields[3].contains("capehorn-next"));
         assert!(fields[3].contains("workspace"));
         assert_eq!(fields[4], "herdr workspace focus w6");
+    }
+
+    fn origin() -> OriginContext {
+        OriginContext {
+            pane: "w1:p1".into(),
+            tab: "w1:t1".into(),
+            workspace: "w1".into(),
+            cwd: "/repo".into(),
+        }
+    }
+
+    fn typed(line: &str) -> NativeInput {
+        NativeInput {
+            line: Some(line.into()),
+            ..NativeInput::default()
+        }
+    }
+
+    fn argv(id: &str, input: NativeInput) -> Vec<String> {
+        native_args(id, &origin(), &input).expect(id)
+    }
+
+    #[test]
+    fn every_native_action_is_planned() {
+        let ids: Vec<&str> = native::NATIVE_ACTIONS.iter().map(|a| a.id).collect();
+        for id in &ids {
+            let mut input = NativeInput {
+                line: Some("notes".into()),
+                extra: Some("main".into()),
+                pick: Some("w1:t2".into()),
+                confirm: true,
+            };
+            if *id == "interrupt_agent" || *id == "rename_agent" || *id == "prompt_agent" {
+                input.pick = Some("reviewer".into());
+            }
+            let got = native_args(id, &origin(), &input);
+            if *id == "start_agent" {
+                assert_eq!(got, Err(NativeErr::MultiStep), "{id}");
+            } else {
+                assert!(got.is_ok(), "{id} should plan argv, got {got:?}");
+            }
+        }
+        assert_eq!(
+            native_args("not_an_action", &origin(), &typed("x")),
+            Err(NativeErr::Unknown)
+        );
+    }
+
+    #[test]
+    fn prompt_actions_submit_the_typed_line_on_enter() {
+        // These used to freeze: ask() waited for EOF instead of newline.
+        let cases = [
+            (
+                "new_tab_named",
+                &[
+                    "tab",
+                    "create",
+                    "--focus",
+                    "--workspace",
+                    "w1",
+                    "--cwd",
+                    "/repo",
+                    "--label",
+                    "notes",
+                ][..],
+            ),
+            ("rename_tab", &["tab", "rename", "w1:t1", "notes"][..]),
+            ("rename_pane", &["pane", "rename", "w1:p1", "notes"][..]),
+            (
+                "new_workspace_here",
+                &[
+                    "workspace",
+                    "create",
+                    "--focus",
+                    "--cwd",
+                    "/repo",
+                    "--label",
+                    "notes",
+                ][..],
+            ),
+            (
+                "rename_workspace",
+                &["workspace", "rename", "w1", "notes"][..],
+            ),
+            (
+                "new_worktree_branch",
+                &[
+                    "worktree",
+                    "create",
+                    "--workspace",
+                    "w1",
+                    "--branch",
+                    "notes",
+                    "--focus",
+                ][..],
+            ),
+        ];
+        for (id, want) in cases {
+            assert_eq!(argv(id, typed("notes")), want, "{id}");
+            assert_eq!(
+                native_args(id, &origin(), &typed("")),
+                Err(NativeErr::Cancel),
+                "{id} empty line cancels"
+            );
+            assert_eq!(line_prompt(id).is_some(), true, "{id} must prompt");
+        }
+        let agent = NativeInput {
+            line: Some("hello".into()),
+            pick: Some("reviewer".into()),
+            ..NativeInput::default()
+        };
+        assert_eq!(
+            argv("prompt_agent", agent.clone()),
+            ["agent", "prompt", "reviewer", "hello"]
+        );
+        assert_eq!(
+            argv(
+                "rename_agent",
+                NativeInput {
+                    line: Some("bot".into()),
+                    pick: Some("reviewer".into()),
+                    ..NativeInput::default()
+                }
+            ),
+            ["agent", "rename", "reviewer", "bot"]
+        );
+    }
+
+    #[test]
+    fn fire_and_forget_native_args() {
+        assert_eq!(
+            argv("new_tab", NativeInput::default()),
+            [
+                "tab",
+                "create",
+                "--focus",
+                "--workspace",
+                "w1",
+                "--cwd",
+                "/repo"
+            ]
+        );
+        assert_eq!(
+            argv("close_tab", NativeInput::default()),
+            ["tab", "close", "w1:t1"]
+        );
+        assert_eq!(
+            argv("split_vertical", NativeInput::default()),
+            [
+                "pane",
+                "split",
+                "w1:p1",
+                "--direction",
+                "right",
+                "--focus",
+                "--cwd",
+                "/repo"
+            ]
+        );
+        assert_eq!(
+            argv("split_horizontal", NativeInput::default()),
+            [
+                "pane",
+                "split",
+                "w1:p1",
+                "--direction",
+                "down",
+                "--focus",
+                "--cwd",
+                "/repo"
+            ]
+        );
+        assert_eq!(
+            argv("close_pane", NativeInput::default()),
+            ["pane", "close", "w1:p1"]
+        );
+        assert_eq!(
+            argv("zoom_pane", NativeInput::default()),
+            ["pane", "zoom", "w1:p1", "--toggle"]
+        );
+        for (id, dir) in [
+            ("focus_left", "left"),
+            ("focus_right", "right"),
+            ("focus_up", "up"),
+            ("focus_down", "down"),
+        ] {
+            assert_eq!(
+                argv(id, NativeInput::default()),
+                ["pane", "focus", "--direction", dir, "--pane", "w1:p1"]
+            );
+        }
+        for (id, dir) in [
+            ("resize_left", "left"),
+            ("resize_right", "right"),
+            ("resize_up", "up"),
+            ("resize_down", "down"),
+        ] {
+            assert_eq!(
+                argv(id, NativeInput::default()),
+                ["pane", "resize", "--direction", dir, "--pane", "w1:p1"]
+            );
+        }
+        for (id, dir) in [
+            ("swap_left", "left"),
+            ("swap_right", "right"),
+            ("swap_up", "up"),
+            ("swap_down", "down"),
+        ] {
+            assert_eq!(
+                argv(id, NativeInput::default()),
+                ["pane", "swap", "--direction", dir, "--pane", "w1:p1"]
+            );
+        }
+        assert_eq!(
+            argv(
+                "move_pane_tab",
+                NativeInput {
+                    pick: Some("w1:t2".into()),
+                    ..NativeInput::default()
+                }
+            ),
+            ["pane", "move", "w1:p1", "--tab", "w1:t2", "--focus"]
+        );
+        assert_eq!(
+            argv("move_pane_new_tab", NativeInput::default()),
+            ["pane", "move", "w1:p1", "--new-tab", "--focus"]
+        );
+        assert_eq!(
+            argv("move_pane_new_workspace", NativeInput::default()),
+            ["pane", "move", "w1:p1", "--new-workspace", "--focus"]
+        );
+        assert_eq!(
+            argv(
+                "interrupt_agent",
+                NativeInput {
+                    pick: Some("reviewer".into()),
+                    ..NativeInput::default()
+                }
+            ),
+            ["agent", "send-keys", "reviewer", "esc"]
+        );
+        assert_eq!(
+            argv("new_workspace", NativeInput::default()),
+            ["workspace", "create", "--focus"]
+        );
+        assert_eq!(
+            argv("close_workspace", NativeInput::default()),
+            ["workspace", "close", "w1"]
+        );
+        assert_eq!(
+            argv("new_worktree", NativeInput::default()),
+            ["worktree", "create", "--workspace", "w1", "--focus"]
+        );
+        assert_eq!(
+            native_args(
+                "remove_worktree",
+                &origin(),
+                &NativeInput {
+                    confirm: false,
+                    ..NativeInput::default()
+                }
+            ),
+            Err(NativeErr::Cancel)
+        );
+        assert_eq!(
+            argv(
+                "remove_worktree",
+                NativeInput {
+                    confirm: true,
+                    ..NativeInput::default()
+                }
+            ),
+            ["worktree", "remove", "--workspace", "w1"]
+        );
+        assert_eq!(
+            argv("reload_config", NativeInput::default()),
+            ["server", "reload-config"]
+        );
+        let with_base = NativeInput {
+            line: Some("feat".into()),
+            extra: Some("main".into()),
+            ..NativeInput::default()
+        };
+        assert_eq!(
+            argv("new_worktree_branch", with_base),
+            [
+                "worktree",
+                "create",
+                "--workspace",
+                "w1",
+                "--branch",
+                "feat",
+                "--focus",
+                "--base",
+                "main"
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_origin_refuses_scoped_actions() {
+        let empty = OriginContext::default();
+        let input = NativeInput::default();
+        for id in [
+            "close_tab",
+            "rename_tab",
+            "split_vertical",
+            "close_pane",
+            "zoom_pane",
+            "rename_pane",
+            "focus_left",
+            "resize_left",
+            "swap_left",
+            "move_pane_tab",
+            "move_pane_new_tab",
+            "move_pane_new_workspace",
+            "new_workspace_here",
+            "close_workspace",
+            "rename_workspace",
+            "new_worktree",
+            "new_worktree_branch",
+            "remove_worktree",
+        ] {
+            let mut i = input.clone();
+            i.line = Some("x".into());
+            i.pick = Some("w1:t2".into());
+            i.confirm = true;
+            assert!(
+                matches!(
+                    native_args(id, &empty, &i),
+                    Err(NativeErr::MissingOrigin(_))
+                ),
+                "{id}"
+            );
+        }
     }
 }

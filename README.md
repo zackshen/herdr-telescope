@@ -91,6 +91,8 @@ Now `prefix` then `p` (Ctrl+B, P with the default prefix) opens the telescope.
   prompt/interrupt/rename agent, new/close/rename workspace, worktrees, and reload
   config. The shortcut column is resolved live from `herdr --default-config` plus your
   `config.toml`; a `[[keys.command]]` binding that shadows a built-in shows no shortcut.
+  Open workspaces appear as `workspace: <name>` in the same list — type part of
+  the name to jump (`capehor` → `workspace: capehorn-next`).
 - **Plugin actions**: every `plugin.action  <title>` from `herdr plugin action list`
   (your own `telescope` actions are hidden). Selecting one runs
   `herdr plugin action invoke <id>` and polls the plugin log so failures surface.

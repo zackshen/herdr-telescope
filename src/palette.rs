@@ -104,7 +104,24 @@ fn build_list(keys: &Keys) -> Vec<String> {
         }
     }
 
-    // 3. File finder + content search entries.
+    // 3. Live workspaces — searchable by name (`capehor` → workspace: capehorn-next).
+    if let Some(list) = herdr::json(["workspace", "list"]) {
+        if let Some(workspaces) = list
+            .pointer("/result/workspaces")
+            .and_then(|v| v.as_array())
+        {
+            for w in workspaces {
+                let id = w.get("workspace_id").and_then(|v| v.as_str()).unwrap_or("");
+                if id.is_empty() {
+                    continue;
+                }
+                let label = w.get("label").and_then(|v| v.as_str()).unwrap_or(id);
+                out.push(workspace_row(id, label));
+            }
+        }
+    }
+
+    // 4. File finder + content search entries.
     out.push(tsv(
         "files",
         "",
@@ -121,6 +138,17 @@ fn build_list(keys: &Keys) -> Vec<String> {
     ));
 
     out
+}
+
+fn workspace_row(id: &str, label: &str) -> String {
+    let name = if label.is_empty() { id } else { label };
+    tsv(
+        "workspace",
+        id,
+        &format!("\u{1b}[2mworkspace:\u{1b}[0m {name}"),
+        &format!("workspace goto jump focus project {name} {id}"),
+        &format!("herdr workspace focus {id}"),
+    )
 }
 
 fn tsv(kind: &str, payload: &str, display: &str, keywords: &str, hint: &str) -> String {
@@ -318,6 +346,12 @@ fn dispatch(kind: &str, payload: &str, ctx: &OriginContext) {
         "plugin" => dispatch_plugin(payload),
         "files" if payload.is_empty() => crate::files::run(&ctx.cwd, &ctx.pane, &ctx.workspace, ""),
         "files" => crate::files::confirm_and_open(payload, &ctx.pane),
+        "workspace" => {
+            if payload.is_empty() {
+                die("telescope: no workspace id to focus.");
+            }
+            run_cli(["workspace", "focus", payload]);
+        }
         "search" => {}
         _ => (), // unknown -> nothing
     }
@@ -914,5 +948,18 @@ mod tests {
         );
         assert_eq!(at_switch("/tmp/a", "/tmp/f", "", ACTIONS_PROMPT, "tel"), "");
         assert_eq!(at_back("/tmp/a", ACTIONS_PROMPT), "");
+    }
+
+    #[test]
+    fn workspace_row_is_searchable_by_name() {
+        let row = workspace_row("w6", "capehorn-next");
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(fields[0], "workspace");
+        assert_eq!(fields[1], "w6");
+        assert!(fields[2].contains("workspace:"));
+        assert!(fields[2].contains("capehorn-next"));
+        assert!(fields[3].contains("capehorn-next"));
+        assert!(fields[3].contains("workspace"));
+        assert_eq!(fields[4], "herdr workspace focus w6");
     }
 }

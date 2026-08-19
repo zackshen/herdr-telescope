@@ -72,7 +72,7 @@ herdr does NOT bind keys declared in a plugin manifest. Add a binding to
 
 ```toml
 [[keys.command]]
-key = "prefix+p"
+key = "cmd+p"
 type = "plugin_action"
 command = "telescope.open"
 description = "Telescope (actions & files)"
@@ -82,7 +82,7 @@ description = "Telescope (actions & files)"
 herdr server reload-config
 ```
 
-Now `prefix` then `p` (Ctrl+B, P with the default prefix) opens the telescope.
+Now `cmd+p` opens the telescope.
 
 ## What's in the list
 

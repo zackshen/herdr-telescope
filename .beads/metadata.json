@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "herdr_telescope",
+  "project_id": "48c84c2a-0f8b-4470-bf09-d6631f26493f"
+}

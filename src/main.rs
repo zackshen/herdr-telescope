@@ -28,6 +28,7 @@ fn main() -> ExitCode {
         "open" => open_action(),
         "palette" => ExitCode::from(palette::run() as u8),
         "at-switch" | "at-back" => ExitCode::from(palette::run_at_helper() as u8),
+        "list-files" => ExitCode::from(files::run_list_files() as u8),
         "rg-files" => ExitCode::from(search::run_rg_files() as u8),
         "rg-preview" | "preview" => ExitCode::from(search::run_rg_preview() as u8),
         _ => {

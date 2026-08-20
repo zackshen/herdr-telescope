@@ -47,9 +47,23 @@ pub fn confirm_and_open(file: &str, origin_pane: &str) {
     }
 }
 
+/// Print TSV file rows for the live fzf `@` switch (`TELESCOPE_CWD`). Invoked
+/// as `herdr-telescope list-files` from fzf `reload-sync`, so the action list
+/// can paint before we walk a large tree such as `$HOME`.
+pub fn run_list_files() -> i32 {
+    let cwd = std::env::var("TELESCOPE_CWD").unwrap_or_default();
+    for line in file_tsv_rows(&cwd) {
+        println!("{line}");
+    }
+    0
+}
+
 /// Same TSV shape as the action list (`kind\tpayload\tdisplay\tkeywords\thint`)
 /// so the main fzf can `reload` these rows when the query starts with `@`.
 pub fn file_tsv_rows(cwd: &str) -> Vec<String> {
+    if cwd.is_empty() || !std::path::Path::new(cwd).is_dir() {
+        return Vec::new();
+    }
     let mut paths = Vec::new();
     collect_files(cwd, &mut paths);
     paths.iter().map(|p| file_row(cwd, p)).collect()
@@ -92,23 +106,32 @@ fn pick_file(cwd: &str, prefill: &str) -> Option<Picked> {
     })
 }
 
+/// Hard cap so a home directory (or any huge tree) cannot stall the popup.
+/// `find` already used this; `fd` previously had none and would scan forever.
+const MAX_FILES: usize = 10_000;
+
+pub(crate) fn fd_args() -> &'static [&'static str] {
+    &[
+        "--type",
+        "f",
+        "--hidden",
+        "-E",
+        ".git",
+        "--max-results",
+        "10000",
+    ]
+}
+
 /// Collect file paths under `cwd`, preferring `fd`, then `git ls-files`, then a
 /// bounded `find`. Returns short paths (relative to cwd where possible).
 fn collect_files(cwd: &str, out: &mut Vec<String>) {
     let fd = std::process::Command::new("fd")
-        .args(["--type", "f", "--hidden", "-E", ".git"])
+        .args(fd_args())
         .current_dir(cwd)
         .output();
     if let Ok(output) = fd {
         if output.status.success() {
-            for line in output.stdout.split(|b| *b == b'\n') {
-                if line.is_empty() {
-                    continue;
-                }
-                if let Ok(s) = std::str::from_utf8(line) {
-                    out.push(s.trim().to_string());
-                }
-            }
+            take_lines(&output.stdout, b'\n', out);
             ensure_absolute(cwd, out);
             return;
         }
@@ -120,14 +143,7 @@ fn collect_files(cwd: &str, out: &mut Vec<String>) {
         .output();
     if let Ok(output) = git {
         if output.status.success() {
-            for part in output.stdout.split(|b| *b == 0) {
-                if part.is_empty() {
-                    continue;
-                }
-                if let Ok(s) = std::str::from_utf8(part) {
-                    out.push(s.trim().to_string());
-                }
-            }
+            take_lines(&output.stdout, 0, out);
             ensure_absolute(cwd, out);
             if !out.is_empty() {
                 return;
@@ -148,11 +164,28 @@ fn collect_files(cwd: &str, out: &mut Vec<String>) {
                 if let Ok(s) = std::str::from_utf8(line) {
                     out.push(s.trim().trim_start_matches("./").to_string());
                 }
-                if out.len() >= 10_000 {
+                if out.len() >= MAX_FILES {
                     break;
                 }
             }
             ensure_absolute(cwd, out);
+        }
+    }
+}
+
+fn take_lines(buf: &[u8], sep: u8, out: &mut Vec<String>) {
+    for part in buf.split(|b| *b == sep) {
+        if part.is_empty() {
+            continue;
+        }
+        if let Ok(s) = std::str::from_utf8(part) {
+            let t = s.trim();
+            if !t.is_empty() {
+                out.push(t.to_string());
+            }
+        }
+        if out.len() >= MAX_FILES {
+            break;
         }
     }
 }
@@ -293,6 +326,41 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fd_is_capped_so_home_cannot_stall_the_popup() {
+        let args = fd_args();
+        assert!(
+            args.windows(2).any(|w| w == ["--max-results", "10000"]),
+            "fd must cap results, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn collect_files_from_home_returns_before_the_popup_stalls() {
+        // Repro: cmd+p from ~ used to wait on unbounded `fd --hidden`, so fzf
+        // never started and the popup stayed empty.
+        let home = match std::env::var("HOME") {
+            Ok(h) if std::path::Path::new(&h).is_dir() => h,
+            _ => return,
+        };
+        let start = std::time::Instant::now();
+        let mut out = Vec::new();
+        collect_files(&home, &mut out);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 8,
+            "collect_files($HOME) stalled for {elapsed:?} ({} files)",
+            out.len()
+        );
+        assert!(out.len() <= MAX_FILES);
+    }
+
+    #[test]
+    fn file_tsv_rows_skips_missing_cwd() {
+        assert!(file_tsv_rows("").is_empty());
+        assert!(file_tsv_rows("/no/such/telescope-cwd").is_empty());
     }
 
     #[test]

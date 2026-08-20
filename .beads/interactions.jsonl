@@ -1,0 +1,1 @@
+{"id":"int-62011361a00569e4d513805d70337e1f","kind":"field_change","created_at":"2026-08-20T06:20:43.678871Z","actor":"Zack Shen","issue_id":"herdr-telescope-00b","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Empty popup from ~ was unbounded fd --hidden before fzf started. File listing is now lazy on @ and fd is capped at 10k."}}

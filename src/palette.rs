@@ -34,12 +34,7 @@ pub fn run() -> i32 {
     let keys = crate::keys::load();
 
     let lines = build_list(&keys);
-    let files = if !ctx.cwd.is_empty() && std::path::Path::new(&ctx.cwd).is_dir() {
-        crate::files::file_tsv_rows(&ctx.cwd)
-    } else {
-        Vec::new()
-    };
-    let sel = fzf_select(&lines, &files, &ctx.cwd).unwrap_or_default();
+    let sel = fzf_select(&lines, &ctx.cwd).unwrap_or_default();
 
     if sel.line.is_empty() {
         return close_self(0);
@@ -207,16 +202,17 @@ enum Mode {
 
 /// fzf `change:transform` helper. `@` → filename list, `/` → rg content
 /// search (fzf's own matcher is disabled so the query is the rg pattern).
-pub fn at_switch(actions: &str, files: &str, query: &str, prompt: &str, exe: &str) -> String {
+pub fn at_switch(actions: &str, query: &str, prompt: &str, exe: &str) -> String {
     let mode = mode_of(prompt);
     if query.starts_with('@') {
+        let list = format!("{exe} list-files");
         return match mode {
             Mode::Files => format!("{STRIP_AT}\n"),
             Mode::Search => format!(
-                "enable-search+reload-sync[cat -- {files}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+change-preview-window[{ACTION_PREVIEW_WIN}]+{STRIP_AT}\n"
+                "enable-search+reload-sync[{list}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+change-preview-window[{ACTION_PREVIEW_WIN}]+{STRIP_AT}\n"
             ),
             Mode::Actions => format!(
-                "reload-sync[cat -- {files}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+{STRIP_AT}\n"
+                "reload-sync[{list}]+change-prompt[{FILES_PROMPT}]+change-header[{FILES_HEADER}]+{STRIP_AT}\n"
             ),
         };
     }
@@ -252,7 +248,6 @@ pub fn run_at_helper() -> i32 {
     let mut args = std::env::args().skip(1);
     let kind = args.next().unwrap_or_default();
     let actions = args.next().unwrap_or_default();
-    let files = args.next().unwrap_or_default();
     let query = std::env::var("FZF_QUERY").unwrap_or_default();
     let prompt = std::env::var("FZF_PROMPT").unwrap_or_default();
     let exe = std::env::current_exe()
@@ -261,28 +256,25 @@ pub fn run_at_helper() -> i32 {
         .unwrap_or_else(|| "herdr-telescope".into());
     let out = match kind.as_str() {
         "at-back" => at_back(&actions, &prompt),
-        _ => at_switch(&actions, &files, &query, &prompt, &exe),
+        _ => at_switch(&actions, &query, &prompt, &exe),
     };
     print!("{out}");
     0
 }
 
-fn fzf_select(lines: &[String], files: &[String], cwd: &str) -> Option<Selection> {
+fn fzf_select(lines: &[String], cwd: &str) -> Option<Selection> {
     let tmp = std::env::temp_dir().join(format!("telescope-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
     let actions_path = tmp.join("actions");
-    let files_path = tmp.join("files");
     let _ = std::fs::write(&actions_path, lines.join("\n") + "\n");
-    let _ = std::fs::write(&files_path, files.join("\n") + "\n");
 
     let exe = std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(str::to_string))
         .unwrap_or_else(|| "herdr-telescope".into());
     let change_bind = format!(
-        "change:transform[{exe} at-switch {actions} {files}]",
+        "change:transform[{exe} at-switch {actions}]",
         actions = actions_path.display(),
-        files = files_path.display(),
     );
     let back_bind = format!(
         "backward-eof:transform[{exe} at-back {actions}]",
@@ -997,9 +989,9 @@ mod tests {
 
     #[test]
     fn at_switch_enters_files_on_at() {
-        let out = at_switch("/tmp/a", "/tmp/f", "@", ACTIONS_PROMPT, "tel");
+        let out = at_switch("/tmp/a", "@", ACTIONS_PROMPT, "tel");
         assert!(
-            out.contains("reload-sync[cat -- /tmp/f]"),
+            out.contains("reload-sync[tel list-files]"),
             "should reload files, got {out:?}"
         );
         assert!(out.contains(&format!("change-prompt[{FILES_PROMPT}]")));
@@ -1008,23 +1000,23 @@ mod tests {
 
     #[test]
     fn at_switch_paste_at_c_strips_prefix() {
-        let out = at_switch("/tmp/a", "/tmp/f", "@C", ACTIONS_PROMPT, "tel");
-        assert!(out.contains("reload-sync[cat -- /tmp/f]"));
+        let out = at_switch("/tmp/a", "@C", ACTIONS_PROMPT, "tel");
+        assert!(out.contains("reload-sync[tel list-files]"));
         assert!(out.contains(STRIP_AT));
     }
 
     #[test]
     fn at_switch_does_not_bounce_while_filtering_files() {
-        assert_eq!(at_switch("/tmp/a", "/tmp/f", "C", FILES_PROMPT, "tel"), "");
+        assert_eq!(at_switch("/tmp/a", "C", FILES_PROMPT, "tel"), "");
         assert_eq!(
-            at_switch("/tmp/a", "/tmp/f", "@C", FILES_PROMPT, "tel"),
+            at_switch("/tmp/a", "@C", FILES_PROMPT, "tel"),
             format!("{STRIP_AT}\n")
         );
     }
 
     #[test]
     fn at_switch_enters_search_on_slash() {
-        let out = at_switch("/tmp/a", "/tmp/f", "/", ACTIONS_PROMPT, "tel");
+        let out = at_switch("/tmp/a", "/", ACTIONS_PROMPT, "tel");
         assert!(out.contains("disable-search"), "got {out:?}");
         assert!(out.contains("reload-sync[tel rg-files]"), "got {out:?}");
         assert!(out.contains(&format!("change-prompt[{SEARCH_PROMPT}]")));
@@ -1038,7 +1030,7 @@ mod tests {
 
     #[test]
     fn at_switch_reloads_rg_while_typing_in_search() {
-        let out = at_switch("/tmp/a", "/tmp/f", "foo", SEARCH_PROMPT, "tel");
+        let out = at_switch("/tmp/a", "foo", SEARCH_PROMPT, "tel");
         assert_eq!(out, "reload-sync[tel rg-files]\n");
     }
 
@@ -1057,11 +1049,8 @@ mod tests {
 
     #[test]
     fn at_switch_noop_while_still_in_actions() {
-        assert_eq!(
-            at_switch("/tmp/a", "/tmp/f", "clo", ACTIONS_PROMPT, "tel"),
-            ""
-        );
-        assert_eq!(at_switch("/tmp/a", "/tmp/f", "", ACTIONS_PROMPT, "tel"), "");
+        assert_eq!(at_switch("/tmp/a", "clo", ACTIONS_PROMPT, "tel"), "");
+        assert_eq!(at_switch("/tmp/a", "", ACTIONS_PROMPT, "tel"), "");
         assert_eq!(at_back("/tmp/a", ACTIONS_PROMPT), "");
     }
 

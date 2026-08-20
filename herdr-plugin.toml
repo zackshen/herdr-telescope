@@ -15,7 +15,7 @@
 
 id = "telescope"
 name = "Herdr Telescope"
-version = "0.1.1"
+version = "0.1.2"
 min_herdr_version = "0.8.0"
 description = "fzf command telescope: built-in native herdr actions, every installed plugin's actions, a file finder (@), and live ripgrep content search (/) — in one centered popup."
 platforms = ["linux", "macos"]

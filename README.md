@@ -137,7 +137,7 @@ See [CHANGELOG.md](CHANGELOG.md). Regenerated from conventional commits:
 brew install git-cliff   # or: cargo install git-cliff
 scripts/changelog.sh                 # all tagged releases
 scripts/changelog.sh --unreleased    # since the latest tag
-scripts/changelog.sh --tag v0.1.2    # as if that tag already exists
+scripts/changelog.sh --tag v0.1.3    # as if that tag already exists
 ```
 
 Pushing a `v*` tag also writes those notes onto the GitHub Release.

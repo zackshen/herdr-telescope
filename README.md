@@ -129,6 +129,19 @@ herdr actions run on the server with **no TTY**, so an action can't run fzf dire
 3. On exit the popup is closed explicitly (popup placement doesn't reliably tear
    itself down).
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Regenerated from conventional commits:
+
+```bash
+brew install git-cliff   # or: cargo install git-cliff
+scripts/changelog.sh                 # all tagged releases
+scripts/changelog.sh --unreleased    # since the latest tag
+scripts/changelog.sh --tag v0.1.2    # as if that tag already exists
+```
+
+Pushing a `v*` tag also writes those notes onto the GitHub Release.
+
 ## Debugging
 
 The palette mode can be driven without a TTY to inspect the generated rows:

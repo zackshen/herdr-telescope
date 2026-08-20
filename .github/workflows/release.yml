@@ -17,9 +17,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: CHANGES.md
+          GITHUB_REPO: ${{ github.repository }}
       - uses: taiki-e/create-gh-release-action@v1
         with:
           title: herdr-telescope $version
+          changelog: CHANGES.md
+          allow-missing-changelog: true
           draft: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
